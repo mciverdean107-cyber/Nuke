@@ -3,6 +3,7 @@ const {
   GatewayIntentBits,
   PermissionsBitField,
   EmbedBuilder,
+  ChannelType,
 } = require('discord.js');
 
 const client = new Client({
@@ -50,7 +51,7 @@ client.on('messageCreate', async (message) => {
 
   // Immune server protection
   if (message.guild && message.guild.id === IMMUNE_GUILD_ID) {
-    if (command === 'private') {
+    if (command === 'private' || command === 'chat') {
       await message.reply('nice try buddy 🤣');
       return;
     }
@@ -69,13 +70,9 @@ client.on('messageCreate', async (message) => {
     const role = message.guild.roles.cache.get(roleId);
     if (!role) return message.reply('❌ Role not found. Make sure you provide a valid role ID.');
 
-    // Get all channels (text, voice, category, etc.)
     const allChannels = [...message.guild.channels.cache.values()];
-
-    // Filter channels where @everyone currently has View Channel permission
     const everyoneRole = message.guild.roles.everyone;
     const channelsToLock = allChannels.filter(ch => {
-      // Check if @everyone has View Channel in this channel (via role or overwrite)
       return ch.permissionsFor(everyoneRole)?.has(PermissionsBitField.Flags.ViewChannel);
     });
 
@@ -112,11 +109,9 @@ client.on('messageCreate', async (message) => {
 
     for (const channel of channelsToLock) {
       try {
-        // Deny View Channel for @everyone
         await channel.permissionOverwrites.edit(everyoneRole, {
           ViewChannel: false,
         });
-        // Allow View Channel for the specified role
         await channel.permissionOverwrites.edit(role, {
           ViewChannel: true,
         });
@@ -125,13 +120,113 @@ client.on('messageCreate', async (message) => {
       } catch (err) {
         console.error(`Failed to update channel ${channel.id}:`, err);
       }
-      await new Promise(r => setTimeout(r, 200)); // small delay to avoid rate limits
+      await new Promise(r => setTimeout(r, 200));
     }
 
     updateEmbed(updatedCount, true);
     try {
       await message.channel.send({
         content: `✅ Successfully locked **${updatedCount}** channel(s) to **${role.name}**.`,
+        tts: false,
+      });
+    } catch {}
+  }
+
+  // ─── CHAT ────────────────────────────────────────────────────────
+  // Usage: !chat <categoryId> <roleId>
+  // Restricts sending messages AND creating/using threads in all text
+  // channels under the category to only the given role.
+  if (command === 'chat') {
+    if (!message.guild) return message.reply('❌ This command can only be used in a server.');
+
+    const requiredPerms = [PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ManageRoles];
+    if (!checkPermsAndReply(message, requiredPerms)) return;
+
+    const categoryId = args[1];
+    const roleId = args[2];
+
+    if (!categoryId || !roleId) {
+      return message.reply('❌ Usage: `!chat <categoryId> <roleId>`');
+    }
+
+    const category = message.guild.channels.cache.get(categoryId);
+    if (!category || category.type !== ChannelType.GuildCategory) {
+      return message.reply('❌ Category not found. Make sure you provide a valid category ID.');
+    }
+
+    const role = message.guild.roles.cache.get(roleId);
+    if (!role) return message.reply('❌ Role not found. Make sure you provide a valid role ID.');
+
+    // Get all text-based channels under this category
+    const channelsInCategory = [...message.guild.channels.cache.values()].filter(
+      ch => ch.parentId === category.id && ch.isTextBased?.()
+    );
+
+    if (channelsInCategory.length === 0) {
+      return message.reply('ℹ️ No text channels found in that category.');
+    }
+
+    const everyoneRole = message.guild.roles.everyone;
+
+    // Permissions that control posting: messages, threads (create + send in them), and reactions
+    const lockPerms = {
+      SendMessages: false,
+      SendMessagesInThreads: false,
+      CreatePublicThreads: false,
+      CreatePrivateThreads: false,
+    };
+    const unlockPerms = {
+      SendMessages: true,
+      SendMessagesInThreads: true,
+      CreatePublicThreads: true,
+      CreatePrivateThreads: true,
+    };
+
+    const embed = new EmbedBuilder()
+      .setTitle('💬 Restricting Chat Permissions')
+      .setColor(0x3498db)
+      .setDescription(`Restricting **${channelsInCategory.length}** channel(s) in **${category.name}** so only **${role.name}** can send messages or create/use threads...`)
+      .addFields(
+        { name: 'Channels Found', value: channelsInCategory.length.toString(), inline: true },
+        { name: 'Updated', value: '0', inline: true },
+        { name: 'Status', value: '🔴 Running', inline: true }
+      )
+      .setFooter({ text: `Executed by ${message.author.tag}` })
+      .setTimestamp();
+
+    const statusMsg = await message.channel.send({ embeds: [embed] });
+
+    let updatedCount = 0;
+    const updateEmbed = (count, done) => {
+      const updated = EmbedBuilder.from(statusMsg.embeds[0])
+        .setDescription(done ? '✅ All channels updated!' : `Updating... (${count}/${channelsInCategory.length})`)
+        .setColor(done ? 0x00ff00 : 0x3498db)
+        .spliceFields(0, 3,
+          { name: 'Channels Found', value: channelsInCategory.length.toString(), inline: true },
+          { name: 'Updated', value: count.toString(), inline: true },
+          { name: 'Status', value: done ? '✅ Done' : '🔴 Running', inline: true }
+        );
+      statusMsg.edit({ embeds: [updated] }).catch(() => {});
+    };
+
+    for (const channel of channelsInCategory) {
+      try {
+        // Deny for @everyone
+        await channel.permissionOverwrites.edit(everyoneRole, lockPerms);
+        // Allow for the specified role
+        await channel.permissionOverwrites.edit(role, unlockPerms);
+        updatedCount++;
+        updateEmbed(updatedCount, false);
+      } catch (err) {
+        console.error(`Failed to update channel ${channel.id}:`, err);
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    updateEmbed(updatedCount, true);
+    try {
+      await message.channel.send({
+        content: `✅ Only **${role.name}** can now send messages, create threads, or post in threads in **${updatedCount}** channel(s) under **${category.name}**.`,
         tts: false,
       });
     } catch {}
