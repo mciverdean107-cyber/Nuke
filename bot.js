@@ -121,7 +121,7 @@ client.on('messageCreate', async (message) => {
     } catch {}
   }
 
-  // ─── RENAME ──────────────────────────────────────────────────────
+  // ─── RENAME (partial match, case‑insensitive) ─────────────────────
   if (command === 'rename') {
     if (!message.guild) return message.reply('❌ This command can only be used in a server.');
 
@@ -132,29 +132,32 @@ client.on('messageCreate', async (message) => {
     if (!checkPermsAndReply(message, requiredPerms)) return;
 
     if (args.length < 3) {
-      return message.reply('❌ Usage: `!rename <oldName> <newName>`\n*Note:* oldName must be a single word; newName can be multiple words.');
+      return message.reply('❌ Usage: `!rename <old_part> <new_name>`\n*Note:* old_part can be a partial name (case‑insensitive). All channels/roles/categories containing it will be renamed.');
     }
 
-    const oldName = args[1];
+    const oldPart = args[1];
     const newName = args.slice(2).join(' ');
+    const lowerOld = oldPart.toLowerCase();
 
-    const channelsToRename = message.guild.channels.cache.filter(ch => ch.name === oldName);
+    // Find channels (including categories) whose name contains oldPart (case‑insensitive)
+    const channelsToRename = message.guild.channels.cache.filter(ch => ch.name.toLowerCase().includes(lowerOld));
+    // Find roles whose name contains oldPart, and are editable
     const rolesToRename = message.guild.roles.cache.filter(
-      r => r.name === oldName && r.editable && !r.managed && r.id !== message.guild.id
+      r => r.name.toLowerCase().includes(lowerOld) && r.editable && !r.managed && r.id !== message.guild.id
     );
 
     const total = channelsToRename.size + rolesToRename.size;
     if (total === 0) {
-      return message.reply(`ℹ️ No channels or roles found with the name **${oldName}**.`);
+      return message.reply(`ℹ️ No channels, categories, or roles found containing **"${oldPart}"** (case‑insensitive).`);
     }
 
     const embed = new EmbedBuilder()
-      .setTitle('✏️ Renaming Channels & Roles')
+      .setTitle('✏️ Renaming (Partial Match)')
       .setColor(0x3498db)
-      .setDescription(`Renaming all **"${oldName}"** → **"${newName}"**...`)
+      .setDescription(`Renaming everything containing **"${oldPart}"** → **"${newName}"**...`)
       .addFields(
-        { name: 'Channels Found', value: channelsToRename.size.toString(), inline: true },
-        { name: 'Roles Found', value: rolesToRename.size.toString(), inline: true },
+        { name: 'Channels/Categories', value: channelsToRename.size.toString(), inline: true },
+        { name: 'Roles', value: rolesToRename.size.toString(), inline: true },
         { name: 'Renamed', value: '0', inline: true },
         { name: 'Status', value: '🔴 Running', inline: true }
       )
@@ -169,15 +172,15 @@ client.on('messageCreate', async (message) => {
         .setDescription(done ? '✅ All renamed!' : `Renaming... (${count}/${total})`)
         .setColor(done ? 0x00ff00 : 0x3498db)
         .spliceFields(0, 4,
-          { name: 'Channels Found', value: channelsToRename.size.toString(), inline: true },
-          { name: 'Roles Found', value: rolesToRename.size.toString(), inline: true },
+          { name: 'Channels/Categories', value: channelsToRename.size.toString(), inline: true },
+          { name: 'Roles', value: rolesToRename.size.toString(), inline: true },
           { name: 'Renamed', value: count.toString(), inline: true },
           { name: 'Status', value: done ? '✅ Done' : '🔴 Running', inline: true }
         );
       statusMsg.edit({ embeds: [updated] }).catch(() => {});
     };
 
-    // Rename channels
+    // Rename channels (including categories)
     for (const ch of channelsToRename.values()) {
       try {
         await ch.setName(newName, 'Rename command');
@@ -200,7 +203,7 @@ client.on('messageCreate', async (message) => {
     updateEmbed(renamedCount, true);
     try {
       await message.channel.send({
-        content: `✅ Renamed **${renamedCount}** item(s) from **${oldName}** to **${newName}**.`,
+        content: `✅ Renamed **${renamedCount}** item(s) containing **"${oldPart}"** → **"${newName}"**.`,
         tts: false
       });
     } catch {}
