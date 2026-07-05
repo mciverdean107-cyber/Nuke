@@ -1,212 +1,132 @@
-const {
-  Client,
-  GatewayIntentBits,
-  PermissionsBitField,
-  EmbedBuilder,
-} = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder } = require('discord.js');
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-  ],
+  intents: [GatewayIntentBits.Guilds]
 });
 
-const PREFIX = '!';
-const IMMUNE_GUILD_ID = '1518698079992287242';
-
-// ─── Helper: check bot permissions and return missing list ───────────
-function getMissingPerms(guild, requiredPerms) {
-  const botMember = guild.members.me;
-  if (!botMember) return requiredPerms;
-  const botPerms = botMember.permissions;
-  return requiredPerms.filter(perm => !botPerms.has(perm));
-}
-
-function checkPermsAndReply(message, requiredPerms) {
-  const missing = getMissingPerms(message.guild, requiredPerms);
-  if (missing.length > 0) {
-    const permNames = missing.map(p => `\`${p}\``).join(', ');
-    message.reply(`❌ I am missing the following permissions:\n${permNames}\nPlease grant them and try again.`);
-    return false;
-  }
-  return true;
-}
-
-// ─── Ready ─────────────────────────────────────────────────────────
-client.once('ready', () => {
+// ─── Ready & Slash Command Registration ─────────────────────────────
+client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+
+  try {
+    await client.application.commands.set([
+      new SlashCommandBuilder()
+        .setName('embed')
+        .setDescription('Send a custom embed to the current channel')
+        .addStringOption(option =>
+          option.setName('color')
+            .setDescription('Embed color (e.g. #ff0000, blue, random)')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('title')
+            .setDescription('Embed title')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('description')
+            .setDescription('Embed description')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('image')
+            .setDescription('Large image URL')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('thumbnail')
+            .setDescription('Thumbnail image URL (top right)')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('footer')
+            .setDescription('Footer text')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('footer_icon')
+            .setDescription('Footer icon URL (requires footer)')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('author')
+            .setDescription('Author name')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('author_icon')
+            .setDescription('Author icon URL (requires author)')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('author_url')
+            .setDescription('Author link URL (requires author)')
+            .setRequired(false))
+        .addBooleanOption(option =>
+          option.setName('timestamp')
+            .setDescription('Add current timestamp')
+            .setRequired(false))
+    ]);
+    console.log('✅ Global slash command /embed registered.');
+  } catch (err) {
+    console.error('❌ Failed to register slash commands:', err);
+  }
 });
 
-// ─── Message Commands ──────────────────────────────────────────────
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (!message.content.startsWith(PREFIX)) return;
+// ─── Interaction Handler ───────────────────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== 'embed') return;
 
-  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-  const command = args[0].toLowerCase();
+  const colorRaw = interaction.options.getString('color') || '#5865F2'; // default Discord blurple
+  const title = interaction.options.getString('title');
+  const description = interaction.options.getString('description');
+  const image = interaction.options.getString('image');
+  const thumbnail = interaction.options.getString('thumbnail');
+  const footer = interaction.options.getString('footer');
+  const footerIcon = interaction.options.getString('footer_icon');
+  const author = interaction.options.getString('author');
+  const authorIcon = interaction.options.getString('author_icon');
+  const authorUrl = interaction.options.getString('author_url');
+  const timestamp = interaction.options.getBoolean('timestamp') || false;
 
-  // Immune server protection
-  if (message.guild && message.guild.id === IMMUNE_GUILD_ID) {
-    if (['wipe', 'rename'].includes(command)) {
-      await message.reply('nice try buddy 🤣');
-      return;
+  // Convert color string to integer
+  let colorInt;
+  if (colorRaw.toLowerCase() === 'random') {
+    colorInt = Math.floor(Math.random() * 0xFFFFFF);
+  } else {
+    // Support hex (#ff0000) and named colors (e.g. 'red') – Discord.js can handle named colors via parseInt? 
+    // We'll try to parse hex, otherwise fallback to default.
+    let hexMatch = colorRaw.match(/^#?([a-fA-F0-9]{6})$/);
+    if (hexMatch) {
+      colorInt = parseInt(hexMatch[1], 16);
+    } else {
+      // Named colors: map common ones
+      const namedColors = {
+        red: 0xff0000,
+        green: 0x00ff00,
+        blue: 0x0000ff,
+        yellow: 0xffff00,
+        orange: 0xffa500,
+        purple: 0x800080,
+        pink: 0xffc0cb,
+        white: 0xffffff,
+        black: 0x000000,
+        blurple: 0x5865F2,
+        grey: 0x808080,
+      };
+      const lower = colorRaw.toLowerCase();
+      colorInt = namedColors[lower] || 0x5865F2;
     }
   }
 
-  // ─── WIPE ─────────────────────────────────────────────────────────
-  if (command === 'wipe') {
-    if (!message.guild) return message.reply('❌ This command can only be used in a server.');
+  const embed = new EmbedBuilder()
+    .setColor(colorInt);
 
-    const requiredPerms = [PermissionsBitField.Flags.ManageChannels];
-    if (!checkPermsAndReply(message, requiredPerms)) return;
+  if (title) embed.setTitle(title);
+  if (description) embed.setDescription(description);
+  if (image) embed.setImage(image);
+  if (thumbnail) embed.setThumbnail(thumbnail);
+  if (footer) embed.setFooter({ text: footer, iconURL: footerIcon || undefined });
+  if (author) embed.setAuthor({ name: author, iconURL: authorIcon || undefined, url: authorUrl || undefined });
+  if (timestamp) embed.setTimestamp();
 
-    const categoryId = args[1];
-    if (!categoryId) return message.reply('❌ Usage: `!wipe <categoryId>`');
-
-    const category = message.guild.channels.cache.get(categoryId);
-    if (!category || category.type !== 4) {
-      return message.reply('❌ Invalid or non‑category channel ID. Provide a valid category ID.');
-    }
-
-    const channelsToDelete = [...category.children.cache.values()];
-    if (channelsToDelete.length === 0) {
-      return message.reply('ℹ️ This category has no channels to delete.');
-    }
-
-    const embed = new EmbedBuilder()
-      .setTitle('🧹 Wiping Category Channels')
-      .setColor(0xff6600)
-      .setDescription(`Deleting all channels in **${category.name}**...`)
-      .addFields(
-        { name: 'Total Channels', value: channelsToDelete.length.toString(), inline: true },
-        { name: 'Deleted', value: '0', inline: true },
-        { name: 'Status', value: '🔴 Running', inline: true }
-      )
-      .setFooter({ text: `Executed by ${message.author.tag}` })
-      .setTimestamp();
-
-    const statusMsg = await message.channel.send({ embeds: [embed] });
-
-    let deletedCount = 0;
-    const updateEmbed = (count, done) => {
-      const updated = EmbedBuilder.from(statusMsg.embeds[0])
-        .setDescription(done ? '✅ All channels deleted!' : `Deleting... (${count}/${channelsToDelete.length})`)
-        .setColor(done ? 0x00ff00 : 0xff6600)
-        .spliceFields(0, 3,
-          { name: 'Total Channels', value: channelsToDelete.length.toString(), inline: true },
-          { name: 'Deleted', value: count.toString(), inline: true },
-          { name: 'Status', value: done ? '✅ Done' : '🔴 Running', inline: true }
-        );
-      statusMsg.edit({ embeds: [updated] }).catch(() => {});
-    };
-
-    for (const channel of channelsToDelete) {
-      try {
-        await channel.delete('Wipe command');
-        deletedCount++;
-        updateEmbed(deletedCount, false);
-      } catch {}
-      await new Promise(r => setTimeout(r, 100));
-    }
-
-    updateEmbed(deletedCount, true);
-    try {
-      await message.channel.send({
-        content: `✅ Wipe complete. Deleted **${deletedCount}** channel(s) in category **${category.name}**.`,
-        tts: false
-      });
-    } catch {}
-  }
-
-  // ─── RENAME (partial match, case‑insensitive) ─────────────────────
-  if (command === 'rename') {
-    if (!message.guild) return message.reply('❌ This command can only be used in a server.');
-
-    const requiredPerms = [
-      PermissionsBitField.Flags.ManageChannels,
-      PermissionsBitField.Flags.ManageRoles
-    ];
-    if (!checkPermsAndReply(message, requiredPerms)) return;
-
-    if (args.length < 3) {
-      return message.reply('❌ Usage: `!rename <old_part> <new_name>`\n*Note:* old_part can be a partial name (case‑insensitive). All channels/roles/categories containing it will be renamed.');
-    }
-
-    const oldPart = args[1];
-    const newName = args.slice(2).join(' ');
-    const lowerOld = oldPart.toLowerCase();
-
-    // Find channels (including categories) whose name contains oldPart (case‑insensitive)
-    const channelsToRename = message.guild.channels.cache.filter(ch => ch.name.toLowerCase().includes(lowerOld));
-    // Find roles whose name contains oldPart, and are editable
-    const rolesToRename = message.guild.roles.cache.filter(
-      r => r.name.toLowerCase().includes(lowerOld) && r.editable && !r.managed && r.id !== message.guild.id
-    );
-
-    const total = channelsToRename.size + rolesToRename.size;
-    if (total === 0) {
-      return message.reply(`ℹ️ No channels, categories, or roles found containing **"${oldPart}"** (case‑insensitive).`);
-    }
-
-    const embed = new EmbedBuilder()
-      .setTitle('✏️ Renaming (Partial Match)')
-      .setColor(0x3498db)
-      .setDescription(`Renaming everything containing **"${oldPart}"** → **"${newName}"**...`)
-      .addFields(
-        { name: 'Channels/Categories', value: channelsToRename.size.toString(), inline: true },
-        { name: 'Roles', value: rolesToRename.size.toString(), inline: true },
-        { name: 'Renamed', value: '0', inline: true },
-        { name: 'Status', value: '🔴 Running', inline: true }
-      )
-      .setFooter({ text: `Executed by ${message.author.tag}` })
-      .setTimestamp();
-
-    const statusMsg = await message.channel.send({ embeds: [embed] });
-
-    let renamedCount = 0;
-    const updateEmbed = (count, done) => {
-      const updated = EmbedBuilder.from(statusMsg.embeds[0])
-        .setDescription(done ? '✅ All renamed!' : `Renaming... (${count}/${total})`)
-        .setColor(done ? 0x00ff00 : 0x3498db)
-        .spliceFields(0, 4,
-          { name: 'Channels/Categories', value: channelsToRename.size.toString(), inline: true },
-          { name: 'Roles', value: rolesToRename.size.toString(), inline: true },
-          { name: 'Renamed', value: count.toString(), inline: true },
-          { name: 'Status', value: done ? '✅ Done' : '🔴 Running', inline: true }
-        );
-      statusMsg.edit({ embeds: [updated] }).catch(() => {});
-    };
-
-    // Rename channels (including categories)
-    for (const ch of channelsToRename.values()) {
-      try {
-        await ch.setName(newName, 'Rename command');
-        renamedCount++;
-        updateEmbed(renamedCount, false);
-      } catch {}
-      await new Promise(r => setTimeout(r, 100));
-    }
-
-    // Rename roles
-    for (const role of rolesToRename.values()) {
-      try {
-        await role.setName(newName, 'Rename command');
-        renamedCount++;
-        updateEmbed(renamedCount, false);
-      } catch {}
-      await new Promise(r => setTimeout(r, 100));
-    }
-
-    updateEmbed(renamedCount, true);
-    try {
-      await message.channel.send({
-        content: `✅ Renamed **${renamedCount}** item(s) containing **"${oldPart}"** → **"${newName}"**.`,
-        tts: false
-      });
-    } catch {}
+  try {
+    await interaction.reply({ embeds: [embed] });
+  } catch (err) {
+    console.error('Failed to send embed:', err);
+    await interaction.reply({ content: '❌ Something went wrong while creating the embed. Check your URLs and try again.', ephemeral: true });
   }
 });
 
