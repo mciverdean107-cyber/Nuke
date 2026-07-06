@@ -11,12 +11,12 @@ const {
 
 const client = new Client({
   intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildModeration,
-    GatewayIntentBits.GuildMessageComponents,
+    1,          // Guilds
+    2,          // GuildMembers
+    4,          // GuildModeration (audit logs)
+    512,        // GuildMessages
+    32768,      // MessageContent
+    16384,      // GuildMessageComponents
   ],
 });
 
@@ -52,12 +52,8 @@ const REMOVAL_THRESHOLD = 2;
 const REMOVAL_WINDOW_MS = 5 * 60 * 1000;
 
 // ─── Embeds ───────────────────────────────────────────────────────
-const EMBED_TITLE = 'STRZ Whitelist';
-const EMBED_DESCRIPTION = 'To get whitelisted, simply type **wl** in this channel.\n\n> Make sure you follow the rules.';
-const EMBED_IMAGE = 'https://cdn.discordapp.com/attachments/1517133194477047808/1523400667320815822/Screenshot_20260705_171214_Discord.jpg?ex=6a4ca1ae&is=6a4b502e&hm=036363d063bc9ba28f14d4485d3330e6a79d8e5c29bcbd9246354d4443978309&';
-const EMBED_THUMBNAIL = 'https://cdn.discordapp.com/attachments/1517133194477047808/1523400669128556797/Untitled104_20260705142221.png?ex=6a4ca1ae&is=6a4b502e&hm=ed7cde8b7a896175d7d48f2750f3f0bc12e5f40ed6410d520fca612c69888804&';
-const EMBED_FOOTER_TEXT = 'STRZ WHITELIST';
-const EMBED_FOOTER_ICON = 'https://cdn.discordapp.com/attachments/1517133194477047808/1523400669128556797/Untitled104_20260705142221.png?ex=6a4ca1ae&is=6a4b502e&hm=ed7cde8b7a896175d7d48f2750f3f0bc12e5f40ed6410d520fca612c69888804&';
+const EMBED_IMAGE = 'https://cdn.discordapp.com/attachments/1517133194477047808/1523400667320815822/Screenshot_20260705_171214_Discord.jpg';
+const EMBED_THUMBNAIL = 'https://cdn.discordapp.com/attachments/1517133194477047808/1523400669128556797/Untitled104_20260705142221.png';
 
 let embedMessage = null;
 let ticketPanelMessage = null;
@@ -104,15 +100,15 @@ function trackRoleRemoval(executorId) {
 // ─── Build whitelist embed ────────────────────────────────────────
 function buildEmbed() {
   return new EmbedBuilder()
-    .setTitle(EMBED_TITLE)
-    .setDescription(EMBED_DESCRIPTION)
+    .setTitle('STRZ Whitelist')
+    .setDescription('To get whitelisted, simply type **wl** in this channel.\n\n> Make sure you follow the rules.')
     .setColor(0xFF0000)
     .setImage(EMBED_IMAGE)
     .setThumbnail(EMBED_THUMBNAIL)
-    .setFooter({ text: EMBED_FOOTER_TEXT, iconURL: EMBED_FOOTER_ICON });
+    .setFooter({ text: 'STRZ WHITELIST', iconURL: EMBED_THUMBNAIL });
 }
 
-// ─── Build ticket panel embed + action row ────────────────────────
+// ─── Build ticket panel ───────────────────────────────────────────
 function buildTicketPanel() {
   const embed = new EmbedBuilder()
     .setTitle('STRZ TICKETS')
@@ -144,9 +140,7 @@ function buildTicketPanel() {
 // ─── Send / refresh ticket panel ──────────────────────────────────
 async function sendTicketPanel(channel) {
   try {
-    if (ticketPanelMessage) {
-      await ticketPanelMessage.delete().catch(() => {});
-    }
+    if (ticketPanelMessage) await ticketPanelMessage.delete().catch(() => {});
     const { embed, row } = buildTicketPanel();
     ticketPanelMessage = await channel.send({ embeds: [embed], components: [row] });
     console.log('✅ Ticket panel sent.');
@@ -157,16 +151,12 @@ async function sendTicketPanel(channel) {
 
 // ─── Handle ticket creation ───────────────────────────────────────
 async function handleTicketInteraction(interaction) {
-  if (!interaction.isStringSelectMenu()) return;
-  if (interaction.customId !== 'ticket_select') return;
-
+  if (!interaction.isStringSelectMenu() || interaction.customId !== 'ticket_select') return;
   await interaction.deferReply({ ephemeral: true });
 
   const selectedValue = interaction.values[0];
   const categoryId = TICKET_CATEGORIES[selectedValue];
-  if (!categoryId) {
-    return interaction.editReply('Invalid selection.');
-  }
+  if (!categoryId) return interaction.editReply('Invalid selection.');
 
   const guild = interaction.guild;
   const member = interaction.member;
@@ -178,49 +168,21 @@ async function handleTicketInteraction(interaction) {
       type: ChannelType.GuildText,
       parent: categoryId,
       permissionOverwrites: [
-        {
-          id: guild.id,
-          deny: [PermissionsBitField.Flags.ViewChannel],
-        },
-        {
-          id: member.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
-        },
-        {
-          id: client.user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-            PermissionsBitField.Flags.ManageChannels,
-          ],
-        },
-        {
-          id: SUPPORT_TEAM_ROLE_ID,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
-        },
+        { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+        { id: member.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
+        { id: client.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageChannels] },
+        { id: SUPPORT_TEAM_ROLE_ID, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
       ],
     });
 
-    await ticketChannel.send({
-      content: `Welcome ${interaction.user}! A staff member will be with you shortly.\nType \`!close\` to close this ticket.`,
-    });
+    await ticketChannel.send(`Welcome ${interaction.user}! A staff member will be with you shortly.\nType \`!close\` to close this ticket.`);
 
-    // Log ticket creation
     const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
     if (logChannel) {
       const logEmbed = new EmbedBuilder()
         .setTitle('🎫 Ticket Created')
         .setColor(0x00FF00)
-        .setDescription(`**User:** ${interaction.user.tag}\n**Type:** ${interaction.values[0]}\n**Channel:** ${ticketChannel}`)
+        .setDescription(`**User:** ${interaction.user.tag}\n**Type:** ${selectedValue}\n**Channel:** ${ticketChannel}`)
         .setTimestamp();
       await logChannel.send({ embeds: [logEmbed] });
     }
@@ -228,20 +190,16 @@ async function handleTicketInteraction(interaction) {
     await interaction.editReply({ content: `Your ticket has been created: ${ticketChannel}`, ephemeral: true });
   } catch (err) {
     console.error('Error creating ticket:', err);
-    await interaction.editReply({ content: '❌ Failed to create ticket. Please try again or contact an admin.', ephemeral: true });
+    await interaction.editReply({ content: '❌ Failed to create ticket.', ephemeral: true });
   }
 }
 
 // ─── Send whitelist embed ─────────────────────────────────────────
 async function sendEmbed() {
   const channel = client.channels.cache.get(WL_CHANNEL_ID);
-  if (!channel) {
-    console.error(`❌ WL channel ${WL_CHANNEL_ID} not found.`);
-    return;
-  }
+  if (!channel) return console.error(`❌ WL channel ${WL_CHANNEL_ID} not found.`);
   try {
-    const msg = await channel.send({ embeds: [buildEmbed()] });
-    embedMessage = msg;
+    embedMessage = await channel.send({ embeds: [buildEmbed()] });
     console.log('✅ Whitelist embed sent.');
   } catch (err) {
     console.error('❌ Failed to send embed:', err);
@@ -250,12 +208,7 @@ async function sendEmbed() {
 
 async function refreshEmbed() {
   if (embedMessage) {
-    try {
-      await embedMessage.delete();
-      console.log('🗑️ Old embed deleted.');
-    } catch (err) {
-      console.error('Failed to delete old embed:', err);
-    }
+    try { await embedMessage.delete(); } catch (err) { console.error('Failed to delete old embed:', err); }
     embedMessage = null;
   }
   await sendEmbed();
@@ -265,41 +218,31 @@ async function refreshEmbed() {
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // ─── Send initial embeds ────────────────────────────────────
+  // Send initial embeds
   await sendEmbed();
   const ticketChannel = client.channels.cache.get(TICKET_CHANNEL_ID);
-  if (ticketChannel) {
-    await sendTicketPanel(ticketChannel);
-  } else {
-    console.error(`❌ Ticket channel ${TICKET_CHANNEL_ID} not found.`);
-  }
+  if (ticketChannel) await sendTicketPanel(ticketChannel);
 
-  // ─── Send test messages to all channels ─────────────────────
+  // Send test messages
   const testEmbed = new EmbedBuilder()
     .setTitle('✅ Bot Online')
     .setDescription('All systems operational – Whitelist, Tickets, and Security modules are active.')
     .setColor(0x00FF00)
     .setTimestamp();
 
-  const wlChannel = client.channels.cache.get(WL_CHANNEL_ID);
-  if (wlChannel) await wlChannel.send({ embeds: [testEmbed] }).catch(() => {});
+  [WL_CHANNEL_ID, TICKET_CHANNEL_ID, LOG_CHANNEL_ID].forEach(id => {
+    const ch = client.channels.cache.get(id);
+    if (ch) ch.send({ embeds: [testEmbed] }).catch(() => {});
+  });
 
-  const ticketChan = client.channels.cache.get(TICKET_CHANNEL_ID);
-  if (ticketChan) await ticketChan.send({ embeds: [testEmbed] }).catch(() => {});
-
-  const logChan = client.channels.cache.get(LOG_CHANNEL_ID);
-  if (logChan) await logChan.send({ embeds: [testEmbed] }).catch(() => {});
-
-  console.log('✅ Test messages sent.');
-
-  // ─── Auto refresh every 30 minutes ─────────────────────────
+  // Auto refresh every 30 minutes
   setInterval(async () => {
     await refreshEmbed();
-    const ticketChan = client.channels.cache.get(TICKET_CHANNEL_ID);
-    if (ticketChan) await sendTicketPanel(ticketChan);
+    const tc = client.channels.cache.get(TICKET_CHANNEL_ID);
+    if (tc) await sendTicketPanel(tc);
   }, 30 * 60 * 1000);
 
-  // ─── SECURITY LISTENERS ────────────────────────────────────
+  // ─── SECURITY LISTENERS ──────────────────────────────────
 
   // 1. Role Deletion
   client.on('roleDelete', async (role) => {
@@ -312,12 +255,9 @@ client.once('ready', async () => {
       if (!executor) return;
       const member = guild.members.cache.get(executor.id) || await guild.members.fetch(executor.id).catch(() => null);
       if (!member) return;
-
       const rolesRemoved = await applyPunishment(member, 'Deleted a role', guild);
       await logPunishment(guild, executor, `Deleted role "${role.name}" (${role.id})`, rolesRemoved, 'Role deletion');
-    } catch (err) {
-      console.error('Error handling role deletion:', err);
-    }
+    } catch (err) { console.error('Error handling role deletion:', err); }
   });
 
   // 2. Channel Deletion
@@ -332,12 +272,9 @@ client.once('ready', async () => {
       if (!executor) return;
       const member = guild.members.cache.get(executor.id) || await guild.members.fetch(executor.id).catch(() => null);
       if (!member) return;
-
       const rolesRemoved = await applyPunishment(member, 'Deleted a channel', guild);
       await logPunishment(guild, executor, `Deleted channel "#${channel.name}" (${channel.id})`, rolesRemoved, 'Channel deletion');
-    } catch (err) {
-      console.error('Error handling channel deletion:', err);
-    }
+    } catch (err) { console.error('Error handling channel deletion:', err); }
   });
 
   // 3. Mass Role Removal Threshold
@@ -346,7 +283,6 @@ client.once('ready', async () => {
       (role, id) => !newMember.roles.cache.has(id) && role.id !== newMember.guild.id
     );
     if (removedRoles.size === 0) return;
-
     try {
       const auditLogs = await newMember.guild.fetchAuditLogs({ type: AuditLogEvent.MemberRoleUpdate, limit: 10 });
       const entry = auditLogs.entries.find(
@@ -357,20 +293,13 @@ client.once('ready', async () => {
       if (!executor) return;
       const executorMember = newMember.guild.members.cache.get(executor.id) || await newMember.guild.members.fetch(executor.id).catch(() => null);
       if (!executorMember) return;
-
       const thresholdExceeded = trackRoleRemoval(executor.id);
       if (thresholdExceeded) {
         const rolesRemovedFromExecutor = await applyPunishment(executorMember, 'Removed roles from >2 members in 5 minutes', newMember.guild);
-        await logPunishment(newMember.guild, executor,
-          'Removed roles from multiple members (exceeded threshold)',
-          rolesRemovedFromExecutor,
-          'Mass role removal detected'
-        );
+        await logPunishment(newMember.guild, executor, 'Removed roles from multiple members (exceeded threshold)', rolesRemovedFromExecutor, 'Mass role removal detected');
         roleRemovalTracker.delete(executor.id);
       }
-    } catch (err) {
-      console.error('Error checking role removal threshold:', err);
-    }
+    } catch (err) { console.error('Error checking role removal threshold:', err); }
 
     // 4. Role Addition Prevention (punished users)
     if (!punishedUsers.has(newMember.id)) return;
@@ -378,16 +307,12 @@ client.once('ready', async () => {
       (role, id) => !oldMember.roles.cache.has(id) && role.id !== WL_ROLE_ID && role.id !== newMember.guild.id
     );
     if (addedRoles.size === 0) return;
-
     try {
       const auditLogs = await newMember.guild.fetchAuditLogs({ type: AuditLogEvent.MemberRoleUpdate, limit: 10 });
       const entry = auditLogs.entries.find(
         e => e.target.id === newMember.id && e.changes?.some(c => c.key === '$add' && addedRoles.has(c.new_value?.id))
       );
-      if (!entry) {
-        await newMember.roles.remove(addedRoles, 'Punished – role addition blocked');
-        return;
-      }
+      if (!entry) { await newMember.roles.remove(addedRoles, 'Punished – role addition blocked'); return; }
       const executor = entry.executor;
       const executorMember = newMember.guild.members.cache.get(executor.id);
       if (!executorMember || !executorMember.roles.cache.has(AUTHORISED_ROLE_ID)) {
@@ -414,9 +339,47 @@ client.once('ready', async () => {
           await logChannel.send({ embeds: [liftEmbed] });
         }
       }
+    } catch (err) { console.error('Error checking role addition:', err); await newMember.roles.remove(addedRoles, 'Punished – safety revert'); }
+  });
+
+  // 5. Bot Add Detection (new security feature)
+  client.on('guildMemberAdd', async (member) => {
+    if (!member.user.bot) return; // only bots
+    const guild = member.guild;
+
+    try {
+      // Fetch audit log to find who added the bot
+      const auditLogs = await guild.fetchAuditLogs({ type: AuditLogEvent.BotAdd, limit: 1 });
+      const entry = auditLogs.entries.first();
+      if (!entry) return; // no audit entry – skip
+      const inviter = entry.executor;
+      if (!inviter) return;
+      const inviterMember = guild.members.cache.get(inviter.id) || await guild.members.fetch(inviter.id).catch(() => null);
+      if (!inviterMember) return;
+
+      // Ban the bot
+      await member.ban({ reason: 'Auto-security: Bot added without authorisation' }).catch(() => {});
+
+      // Punish the inviter (strip all roles except whitelist)
+      const rolesRemoved = await applyPunishment(inviterMember, 'Added a bot to the server', guild);
+
+      // Log the event
+      const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
+      if (logChannel) {
+        const logEmbed = new EmbedBuilder()
+          .setTitle('🤖 Bot Add Detected – Punishment Applied')
+          .setColor(0xFF0000)
+          .setDescription(`**Bot added:** ${member.user.tag} (${member.id})\n**Inviter:** ${inviter.tag} (${inviter.id})`)
+          .addFields(
+            { name: 'Action', value: `Bot banned, inviter stripped of ${rolesRemoved.size} role(s)`, inline: true },
+            { name: 'Remaining Roles', value: `<@&${WL_ROLE_ID}> only` }
+          )
+          .setTimestamp()
+          .setFooter({ text: 'Auto Security Log' });
+        await logChannel.send({ embeds: [logEmbed] });
+      }
     } catch (err) {
-      console.error('Error checking role addition:', err);
-      await newMember.roles.remove(addedRoles, 'Punished – safety revert');
+      console.error('Error handling bot add:', err);
     }
   });
 });
@@ -426,8 +389,7 @@ client.on('interactionCreate', handleTicketInteraction);
 
 // ─── Whitelist message handler ────────────────────────────────────
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (message.channel.id !== WL_CHANNEL_ID) return;
+  if (message.author.bot || message.channel.id !== WL_CHANNEL_ID) return;
   const content = message.content.trim().toLowerCase();
   if (content === 'wl') {
     try {
@@ -449,7 +411,7 @@ client.on('messageCreate', async (message) => {
         content: '❌ To get whitelisted, please type **wl** in this channel.\n*(This message will be deleted in 5 seconds)*',
       });
       await message.delete();
-      setTimeout(() => { reply.delete().catch(() => {}); }, 5000);
+      setTimeout(() => reply.delete().catch(() => {}), 5000);
     } catch (err) {
       console.error('Error handling non‑wl message:', err);
     }
@@ -458,8 +420,8 @@ client.on('messageCreate', async (message) => {
 
 // ─── Close ticket command ─────────────────────────────────────────
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (message.content.toLowerCase() === '!close' && message.channel.parentId && Object.values(TICKET_CATEGORIES).includes(message.channel.parentId)) {
+  if (message.author.bot || message.content.toLowerCase() !== '!close') return;
+  if (message.channel.parentId && Object.values(TICKET_CATEGORIES).includes(message.channel.parentId)) {
     try {
       await message.channel.delete('Ticket closed by user');
     } catch (err) {
