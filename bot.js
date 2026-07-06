@@ -6,14 +6,17 @@ const {
   AuditLogEvent,
   ActionRowBuilder,
   StringSelectMenuBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
+  ComponentType,
 } = require('discord.js');
 
 const client = new Client({
   intents: [
     1,          // Guilds
     2,          // GuildMembers
-    4,          // GuildModeration (audit logs)
+    4,          // GuildModeration
     512,        // GuildMessages
     32768,      // MessageContent
     16384,      // GuildMessageComponents
@@ -27,6 +30,9 @@ const LOG_CHANNEL_ID = '1523392065411747870';
 const AUTHORISED_ROLE_ID = '1523391574296367194';
 const TICKET_CHANNEL_ID = '1523391948260507700';
 const SUPPORT_TEAM_ROLE_ID = '1523391626503000134';
+const APPLY_CHANNEL_ID = '1523391955827036360';
+const APP_LOG_CHANNEL_ID = '1523392059195523376';
+const APP_RESULT_CHANNEL_ID = '1523391958528032788';
 
 // ─── Category IDs for tickets ─────────────────────────────────────
 const TICKET_CATEGORIES = {
@@ -50,6 +56,23 @@ const punishedUsers = new Set();
 const roleRemovalTracker = new Map();
 const REMOVAL_THRESHOLD = 2;
 const REMOVAL_WINDOW_MS = 5 * 60 * 1000;
+
+// ─── Staff Application System ─────────────────────────────────────
+const STAFF_QUESTIONS = [
+  'What is your Discord username and age?',
+  'Have you ever been staff on a FiveM server before? If yes, describe your experience.',
+  'Why do you want to become staff on our FiveM RP/PVP server?',
+  'How many hours per week can you dedicate to moderating the server?',
+  'A player is repeatedly breaking rules in chat. Describe the steps you would take.',
+  'A staff member is abusing their powers. What do you do?',
+  'How would you handle a situation where two players are accusing each other of RDM (Random Deathmatch)?',
+  'What is your opinion on using OOC (Out of Character) knowledge in IC (In Character) situations?',
+  'Describe a time you had to resolve a conflict between players. What was the outcome?',
+  'Why should we choose you over other applicants?',
+];
+
+const pendingApplications = new Map(); // userId -> { step, answers, author }
+const appMessagesMap = new Map(); // messageId -> { userId, embed, row }
 
 // ─── Embeds ───────────────────────────────────────────────────────
 const EMBED_IMAGE = 'https://cdn.discordapp.com/attachments/1517133194477047808/1523400667320815822/Screenshot_20260705_171214_Discord.jpg';
@@ -137,6 +160,24 @@ function buildTicketPanel() {
   return { embed, row };
 }
 
+// ─── Build application panel ──────────────────────────────────────
+function buildAppPanel() {
+  const embed = new EmbedBuilder()
+    .setTitle('STRZ Staff Applications')
+    .setDescription('Click the button below to apply for staff on our FiveM RP/PVP server.\n\nYou will be asked 10 questions via DM. Make sure your DMs are open!')
+    .setColor(0xFF0000)
+    .setImage(EMBED_IMAGE)
+    .setTimestamp();
+
+  const button = new ButtonBuilder()
+    .setCustomId('staff_apply')
+    .setLabel('Apply Now')
+    .setStyle(ButtonStyle.Primary);
+
+  const row = new ActionRowBuilder().addComponents(button);
+  return { embed, row };
+}
+
 // ─── Send / refresh ticket panel ──────────────────────────────────
 async function sendTicketPanel(channel) {
   try {
@@ -147,6 +188,42 @@ async function sendTicketPanel(channel) {
   } catch (err) {
     console.error('❌ Failed to send ticket panel:', err);
   }
+}
+
+// ─── Send application panel ───────────────────────────────────────
+async function sendAppPanel(channel) {
+  try {
+    const { embed, row } = buildAppPanel();
+    await channel.send({ embeds: [embed], components: [row] });
+    console.log('✅ Application panel sent.');
+  } catch (err) {
+    console.error('❌ Failed to send application panel:', err);
+  }
+}
+
+// ─── Transcript function ─────────────────────────────────────────
+async function generateTranscript(channel, closer) {
+  const messages = await channel.messages.fetch({ limit: 100 });
+  const messageMap = new Map();
+  messages.forEach(msg => {
+    if (msg.author.bot) return;
+    if (!messageMap.has(msg.author.id)) messageMap.set(msg.author.id, { user: msg.author, count: 0 });
+    messageMap.get(msg.author.id).count++;
+  });
+
+  const transcriptEmbed = new EmbedBuilder()
+    .setTitle('🎫 Ticket Closed')
+    .setColor(0xFF0000)
+    .setDescription(`**Ticket:** ${channel.name}\n**Closed by:** ${closer.tag} (${closer.id})`)
+    .addFields(
+      { name: 'Message Activity', value: messageMap.size > 0
+        ? [...messageMap.entries()].map(([id, data]) => `<@${id}>: ${data.count} messages`).join('\n')
+        : 'No messages (only bots)' }
+    )
+    .setTimestamp()
+    .setFooter({ text: 'Ticket Transcript' });
+
+  return transcriptEmbed;
 }
 
 // ─── Handle ticket creation ───────────────────────────────────────
@@ -175,7 +252,7 @@ async function handleTicketInteraction(interaction) {
       ],
     });
 
-    await ticketChannel.send(`Welcome ${interaction.user}! A <@&1523391626503000134> member will be with you shortly.\nType \`!close\` to close this ticket.`);
+    await ticketChannel.send(`Welcome ${interaction.user}! A staff member will be with you shortly.\nType \`!close\` to close this ticket.\nUse \`!add @user\` to add someone to this ticket.`);
 
     const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
     if (logChannel) {
@@ -192,6 +269,148 @@ async function handleTicketInteraction(interaction) {
     console.error('Error creating ticket:', err);
     await interaction.editReply({ content: '❌ Failed to create ticket.', ephemeral: true });
   }
+}
+
+// ─── Handle staff application button ──────────────────────────────
+async function handleAppButton(interaction) {
+  if (interaction.customId !== 'staff_apply') return;
+  await interaction.deferReply({ ephemeral: true });
+
+  const user = interaction.user;
+  if (pendingApplications.has(user.id)) {
+    return interaction.editReply('You already have an active application. Please complete it first.');
+  }
+
+  try {
+    await user.send('**Staff Application – Question 1/10**\n' + STAFF_QUESTIONS[0]);
+    pendingApplications.set(user.id, { step: 0, answers: [], author: user });
+    await interaction.editReply('I have sent you the first question via DM! Please check your DMs.');
+  } catch (err) {
+    console.error('Could not DM user:', err);
+    await interaction.editReply('❌ I could not send you a DM. Please enable DMs from server members and try again.');
+  }
+}
+
+// ─── Handle DM replies for applications ───────────────────────────
+client.on('messageCreate', async (message) => {
+  if (message.author.bot || message.channel.type !== ChannelType.DM) return;
+
+  const userId = message.author.id;
+  const app = pendingApplications.get(userId);
+  if (!app) return;
+
+  const { step, answers } = app;
+
+  if (step >= STAFF_QUESTIONS.length) return; // should not happen
+
+  answers.push(message.content);
+
+  if (step + 1 < STAFF_QUESTIONS.length) {
+    await message.author.send(`**Staff Application – Question ${step+2}/${STAFF_QUESTIONS.length}**\n${STAFF_QUESTIONS[step+1]}`);
+    app.step++;
+  } else {
+    // Complete
+    await message.author.send('✅ Thank you! Your application has been submitted for review.');
+    pendingApplications.delete(userId);
+
+    // Build embed with answers
+    const embed = new EmbedBuilder()
+      .setTitle('📋 New Staff Application')
+      .setColor(0xFF0000)
+      .setDescription(`**Applicant:** ${message.author.tag} (${message.author.id})`)
+      .addFields(
+        STAFF_QUESTIONS.map((q, i) => ({
+          name: `Q${i+1}: ${q}`,
+          value: answers[i] || 'No answer',
+          inline: false,
+        }))
+      )
+      .setTimestamp()
+      .setFooter({ text: 'Staff Applications' });
+
+    const acceptBtn = new ButtonBuilder()
+      .setCustomId('app_accept')
+      .setLabel('Accept')
+      .setStyle(ButtonStyle.Success);
+
+    const denyBtn = new ButtonBuilder()
+      .setCustomId('app_deny')
+      .setLabel('Deny')
+      .setStyle(ButtonStyle.Danger);
+
+    const row = new ActionRowBuilder().addComponents(acceptBtn, denyBtn);
+
+    const logChannel = client.channels.cache.get(APP_LOG_CHANNEL_ID);
+    if (!logChannel) return console.error('❌ Application log channel not found');
+
+    const sentMsg = await logChannel.send({
+      content: `<@&${SUPPORT_TEAM_ROLE_ID}>`,
+      embeds: [embed],
+      components: [row],
+    });
+
+    // Store for later action handling
+    appMessagesMap.set(sentMsg.id, { userId, embed, row });
+  }
+});
+
+// ─── Handle accept/deny buttons ───────────────────────────────────
+async function handleAppDecision(interaction) {
+  if (!interaction.isButton()) return;
+  if (interaction.customId !== 'app_accept' && interaction.customId !== 'app_deny') return;
+
+  const msgId = interaction.message.id;
+  const appData = appMessagesMap.get(msgId);
+  if (!appData) {
+    return interaction.reply({ content: 'This application has already been processed.', ephemeral: true });
+  }
+
+  const { userId, embed, row } = appData;
+  const applicant = await client.users.fetch(userId).catch(() => null);
+  if (!applicant) {
+    return interaction.reply({ content: 'Could not fetch applicant.', ephemeral: true });
+  }
+
+  // Disable buttons
+  const newRow = ActionRowBuilder.from(row);
+  newRow.components.forEach(btn => btn.setDisabled(true));
+  await interaction.message.edit({ components: [newRow] });
+  appMessagesMap.delete(msgId);
+
+  const resultChannel = client.channels.cache.get(APP_RESULT_CHANNEL_ID);
+  if (!resultChannel) return console.error('❌ Result channel not found');
+
+  if (interaction.customId === 'app_accept') {
+    const acceptEmbed = new EmbedBuilder()
+      .setTitle('✅ Application Accepted')
+      .setColor(0x00FF00)
+      .setDescription(`Your application has been accepted! <:strz:1523654478711226429>\n\n${applicant} please open a <#${TICKET_CHANNEL_ID}> and @ a member of our staff team!`)
+      .setTimestamp()
+      .setFooter({ text: `Accepted by ${interaction.user.tag}` });
+
+    await resultChannel.send({ content: `${applicant}`, embeds: [acceptEmbed] });
+
+    // Also DM applicant
+    await applicant.send('🎉 Congratulations! Your staff application has been accepted. Please open a ticket in the server to proceed.').catch(() => {});
+  } else {
+    const denyEmbed = new EmbedBuilder()
+      .setTitle('❌ Application Denied')
+      .setColor(0xFF0000)
+      .setDescription(`Sorry but at this moment in time you have been denied.\n\n${applicant} feel free to apply again in 2 days!`)
+      .setTimestamp()
+      .setFooter({ text: `Denied by ${interaction.user.tag}` });
+
+    await resultChannel.send({ content: `${applicant}`, embeds: [denyEmbed] });
+
+    await applicant.send('Your staff application has been denied. You may reapply in 2 days.').catch(() => {});
+  }
+
+  // Update log embed to show processed
+  const processedEmbed = EmbedBuilder.from(embed)
+    .setFooter({ text: `Processed by ${interaction.user.tag}` });
+  await interaction.message.edit({ embeds: [processedEmbed], components: [newRow] });
+
+  await interaction.reply({ content: 'Application processed successfully.', ephemeral: true });
 }
 
 // ─── Send whitelist embed ─────────────────────────────────────────
@@ -218,28 +437,21 @@ async function refreshEmbed() {
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Send initial embeds
+  // Send initial embeds (NO test messages)
   await sendEmbed();
   const ticketChannel = client.channels.cache.get(TICKET_CHANNEL_ID);
   if (ticketChannel) await sendTicketPanel(ticketChannel);
 
-  // Send test messages
-  const testEmbed = new EmbedBuilder()
-    .setTitle('✅ Bot Online')
-    .setDescription('All systems operational – Whitelist, Tickets, and Security modules are active.')
-    .setColor(0x00FF00)
-    .setTimestamp();
-
-  [WL_CHANNEL_ID, TICKET_CHANNEL_ID, LOG_CHANNEL_ID].forEach(id => {
-    const ch = client.channels.cache.get(id);
-    if (ch) ch.send({ embeds: [testEmbed] }).catch(() => {});
-  });
+  const applyChannel = client.channels.cache.get(APPLY_CHANNEL_ID);
+  if (applyChannel) await sendAppPanel(applyChannel);
 
   // Auto refresh every 30 minutes
   setInterval(async () => {
     await refreshEmbed();
     const tc = client.channels.cache.get(TICKET_CHANNEL_ID);
     if (tc) await sendTicketPanel(tc);
+    const ac = client.channels.cache.get(APPLY_CHANNEL_ID);
+    if (ac) await sendAppPanel(ac); // refresh app panel too
   }, 30 * 60 * 1000);
 
   // ─── SECURITY LISTENERS ──────────────────────────────────
@@ -342,28 +554,22 @@ client.once('ready', async () => {
     } catch (err) { console.error('Error checking role addition:', err); await newMember.roles.remove(addedRoles, 'Punished – safety revert'); }
   });
 
-  // 5. Bot Add Detection (new security feature)
+  // 5. Bot Add Detection
   client.on('guildMemberAdd', async (member) => {
-    if (!member.user.bot) return; // only bots
+    if (!member.user.bot) return;
     const guild = member.guild;
-
     try {
-      // Fetch audit log to find who added the bot
       const auditLogs = await guild.fetchAuditLogs({ type: AuditLogEvent.BotAdd, limit: 1 });
       const entry = auditLogs.entries.first();
-      if (!entry) return; // no audit entry – skip
+      if (!entry) return;
       const inviter = entry.executor;
       if (!inviter) return;
       const inviterMember = guild.members.cache.get(inviter.id) || await guild.members.fetch(inviter.id).catch(() => null);
       if (!inviterMember) return;
 
-      // Ban the bot
       await member.ban({ reason: 'Auto-security: Bot added without authorisation' }).catch(() => {});
-
-      // Punish the inviter (strip all roles except whitelist)
       const rolesRemoved = await applyPunishment(inviterMember, 'Added a bot to the server', guild);
 
-      // Log the event
       const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
       if (logChannel) {
         const logEmbed = new EmbedBuilder()
@@ -378,14 +584,22 @@ client.once('ready', async () => {
           .setFooter({ text: 'Auto Security Log' });
         await logChannel.send({ embeds: [logEmbed] });
       }
-    } catch (err) {
-      console.error('Error handling bot add:', err);
-    }
+    } catch (err) { console.error('Error handling bot add:', err); }
   });
 });
 
-// ─── Interaction handler for ticket menu ──────────────────────────
-client.on('interactionCreate', handleTicketInteraction);
+// ─── Interaction handlers ─────────────────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+  if (interaction.isStringSelectMenu()) {
+    await handleTicketInteraction(interaction);
+  } else if (interaction.isButton()) {
+    if (interaction.customId === 'staff_apply') {
+      await handleAppButton(interaction);
+    } else {
+      await handleAppDecision(interaction);
+    }
+  }
+});
 
 // ─── Whitelist message handler ────────────────────────────────────
 client.on('messageCreate', async (message) => {
@@ -418,14 +632,46 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// ─── Close ticket command ─────────────────────────────────────────
+// ─── Ticket commands: !close and !add ─────────────────────────────
 client.on('messageCreate', async (message) => {
-  if (message.author.bot || message.content.toLowerCase() !== '!close') return;
-  if (message.channel.parentId && Object.values(TICKET_CATEGORIES).includes(message.channel.parentId)) {
+  if (message.author.bot) return;
+  const isTicket = message.channel.parentId && Object.values(TICKET_CATEGORIES).includes(message.channel.parentId);
+  if (!isTicket) return;
+
+  const content = message.content.trim().toLowerCase();
+
+  if (content === '!close') {
     try {
-      await message.channel.delete('Ticket closed by user');
+      const transcriptEmbed = await generateTranscript(message.channel, message.author);
+      const logChannel = client.channels.cache.get(LOG_CHANNEL_ID);
+      if (logChannel) await logChannel.send({ embeds: [transcriptEmbed] });
+
+      await message.channel.send('🗑️ This ticket will be deleted in 5 seconds...');
+      setTimeout(async () => {
+        await message.channel.delete('Ticket closed by user').catch(() => {});
+      }, 5000);
     } catch (err) {
       console.error('Error closing ticket:', err);
+      await message.channel.send('❌ Failed to close ticket.');
+    }
+  }
+
+  if (content.startsWith('!add ')) {
+    const userMention = content.replace('!add ', '').trim();
+    const user = message.mentions.users.first();
+    if (!user) {
+      return message.reply('❌ Please mention a user, e.g. `!add @user`');
+    }
+    try {
+      await message.channel.permissionOverwrites.create(user.id, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+      });
+      await message.channel.send(`✅ Added ${user} to this ticket.`);
+    } catch (err) {
+      console.error('Error adding user to ticket:', err);
+      await message.reply('❌ Failed to add user. Check permissions.');
     }
   }
 });
