@@ -175,7 +175,7 @@ async function handleTicketInteraction(interaction) {
       ],
     });
 
-    await ticketChannel.send(`Welcome ${interaction.user}! A staff member will be with you shortly.\nType \`!close\` to close this ticket.`);
+    await ticketChannel.send(`Welcome ${interaction.user}! A <@&1523391626503000134> member will be with you shortly.\nType \`!close\` to close this ticket.`);
 
     const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
     if (logChannel) {
