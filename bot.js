@@ -19,8 +19,11 @@ const client = new Client({
     512,        // GuildMessages
     32768,      // MessageContent
     16384,      // GuildMessageComponents
+    4096,       // DirectMessages (essential for DMs)
   ],
 });
+
+// (rest of the code as before – keep all definitions and functions)
 
 // ─── IDs ──────────────────────────────────────────────────────────
 const WL_CHANNEL_ID = '1523391788914708580';
