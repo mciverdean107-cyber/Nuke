@@ -265,6 +265,7 @@ async function refreshEmbed() {
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
+  // ─── Send initial embeds ────────────────────────────────────
   await sendEmbed();
   const ticketChannel = client.channels.cache.get(TICKET_CHANNEL_ID);
   if (ticketChannel) {
@@ -273,16 +274,151 @@ client.once('ready', async () => {
     console.error(`❌ Ticket channel ${TICKET_CHANNEL_ID} not found.`);
   }
 
-  // Auto refresh both every 30 minutes
+  // ─── Send test messages to all channels ─────────────────────
+  const testEmbed = new EmbedBuilder()
+    .setTitle('✅ Bot Online')
+    .setDescription('All systems operational – Whitelist, Tickets, and Security modules are active.')
+    .setColor(0x00FF00)
+    .setTimestamp();
+
+  const wlChannel = client.channels.cache.get(WL_CHANNEL_ID);
+  if (wlChannel) await wlChannel.send({ embeds: [testEmbed] }).catch(() => {});
+
+  const ticketChan = client.channels.cache.get(TICKET_CHANNEL_ID);
+  if (ticketChan) await ticketChan.send({ embeds: [testEmbed] }).catch(() => {});
+
+  const logChan = client.channels.cache.get(LOG_CHANNEL_ID);
+  if (logChan) await logChan.send({ embeds: [testEmbed] }).catch(() => {});
+
+  console.log('✅ Test messages sent.');
+
+  // ─── Auto refresh every 30 minutes ─────────────────────────
   setInterval(async () => {
     await refreshEmbed();
     const ticketChan = client.channels.cache.get(TICKET_CHANNEL_ID);
     if (ticketChan) await sendTicketPanel(ticketChan);
   }, 30 * 60 * 1000);
 
-  // ─── Security listeners (unchanged) ─────────────────────────
-  // (All security code from previous version remains – omitted here for brevity, copy from previous answer)
-  // ... paste the full security listeners from the previous answer here ...
+  // ─── SECURITY LISTENERS ────────────────────────────────────
+
+  // 1. Role Deletion
+  client.on('roleDelete', async (role) => {
+    const guild = role.guild;
+    try {
+      const auditLogs = await guild.fetchAuditLogs({ type: AuditLogEvent.RoleDelete, limit: 1 });
+      const entry = auditLogs.entries.first();
+      if (!entry) return;
+      const executor = entry.executor;
+      if (!executor) return;
+      const member = guild.members.cache.get(executor.id) || await guild.members.fetch(executor.id).catch(() => null);
+      if (!member) return;
+
+      const rolesRemoved = await applyPunishment(member, 'Deleted a role', guild);
+      await logPunishment(guild, executor, `Deleted role "${role.name}" (${role.id})`, rolesRemoved, 'Role deletion');
+    } catch (err) {
+      console.error('Error handling role deletion:', err);
+    }
+  });
+
+  // 2. Channel Deletion
+  client.on('channelDelete', async (channel) => {
+    const guild = channel.guild;
+    if (!guild) return;
+    try {
+      const auditLogs = await guild.fetchAuditLogs({ type: AuditLogEvent.ChannelDelete, limit: 1 });
+      const entry = auditLogs.entries.first();
+      if (!entry) return;
+      const executor = entry.executor;
+      if (!executor) return;
+      const member = guild.members.cache.get(executor.id) || await guild.members.fetch(executor.id).catch(() => null);
+      if (!member) return;
+
+      const rolesRemoved = await applyPunishment(member, 'Deleted a channel', guild);
+      await logPunishment(guild, executor, `Deleted channel "#${channel.name}" (${channel.id})`, rolesRemoved, 'Channel deletion');
+    } catch (err) {
+      console.error('Error handling channel deletion:', err);
+    }
+  });
+
+  // 3. Mass Role Removal Threshold
+  client.on('guildMemberUpdate', async (oldMember, newMember) => {
+    const removedRoles = oldMember.roles.cache.filter(
+      (role, id) => !newMember.roles.cache.has(id) && role.id !== newMember.guild.id
+    );
+    if (removedRoles.size === 0) return;
+
+    try {
+      const auditLogs = await newMember.guild.fetchAuditLogs({ type: AuditLogEvent.MemberRoleUpdate, limit: 10 });
+      const entry = auditLogs.entries.find(
+        e => e.target.id === newMember.id && e.changes?.some(c => c.key === '$remove' && removedRoles.has(c.new_value?.id))
+      );
+      if (!entry) return;
+      const executor = entry.executor;
+      if (!executor) return;
+      const executorMember = newMember.guild.members.cache.get(executor.id) || await newMember.guild.members.fetch(executor.id).catch(() => null);
+      if (!executorMember) return;
+
+      const thresholdExceeded = trackRoleRemoval(executor.id);
+      if (thresholdExceeded) {
+        const rolesRemovedFromExecutor = await applyPunishment(executorMember, 'Removed roles from >2 members in 5 minutes', newMember.guild);
+        await logPunishment(newMember.guild, executor,
+          'Removed roles from multiple members (exceeded threshold)',
+          rolesRemovedFromExecutor,
+          'Mass role removal detected'
+        );
+        roleRemovalTracker.delete(executor.id);
+      }
+    } catch (err) {
+      console.error('Error checking role removal threshold:', err);
+    }
+
+    // 4. Role Addition Prevention (punished users)
+    if (!punishedUsers.has(newMember.id)) return;
+    const addedRoles = newMember.roles.cache.filter(
+      (role, id) => !oldMember.roles.cache.has(id) && role.id !== WL_ROLE_ID && role.id !== newMember.guild.id
+    );
+    if (addedRoles.size === 0) return;
+
+    try {
+      const auditLogs = await newMember.guild.fetchAuditLogs({ type: AuditLogEvent.MemberRoleUpdate, limit: 10 });
+      const entry = auditLogs.entries.find(
+        e => e.target.id === newMember.id && e.changes?.some(c => c.key === '$add' && addedRoles.has(c.new_value?.id))
+      );
+      if (!entry) {
+        await newMember.roles.remove(addedRoles, 'Punished – role addition blocked');
+        return;
+      }
+      const executor = entry.executor;
+      const executorMember = newMember.guild.members.cache.get(executor.id);
+      if (!executorMember || !executorMember.roles.cache.has(AUTHORISED_ROLE_ID)) {
+        await newMember.roles.remove(addedRoles, 'Punished – role addition blocked');
+        const logChannel = newMember.guild.channels.cache.get(LOG_CHANNEL_ID);
+        if (logChannel) {
+          const warnEmbed = new EmbedBuilder()
+            .setTitle('⛔ Unauthorised Role Addition Attempt')
+            .setColor(0xFF8800)
+            .setDescription(`**Target:** ${newMember.user.tag}\n**Attempted by:** ${executor?.tag || 'Unknown'}\n**Roles:** ${addedRoles.map(r => r.name).join(', ')}`)
+            .setTimestamp();
+          await logChannel.send({ embeds: [warnEmbed] });
+        }
+      } else {
+        punishedUsers.delete(newMember.id);
+        const logChannel = newMember.guild.channels.cache.get(LOG_CHANNEL_ID);
+        if (logChannel) {
+          const liftEmbed = new EmbedBuilder()
+            .setTitle('✅ Punishment Lifted')
+            .setColor(0x00FF00)
+            .setDescription(`**User:** ${newMember.user.tag}\n**Lifted by:** ${executor.tag}`)
+            .addFields({ name: 'Authorised Role Given', value: addedRoles.map(r => `<@&${r.id}>`).join(', ') })
+            .setTimestamp();
+          await logChannel.send({ embeds: [liftEmbed] });
+        }
+      }
+    } catch (err) {
+      console.error('Error checking role addition:', err);
+      await newMember.roles.remove(addedRoles, 'Punished – safety revert');
+    }
+  });
 });
 
 // ─── Interaction handler for ticket menu ──────────────────────────
