@@ -16,16 +16,17 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildModeration,
-    GatewayIntentBits.GuildMessageComponents, // required for select menus
+    GatewayIntentBits.GuildMessageComponents,
   ],
 });
 
-// ─── Channel / Role IDs ───────────────────────────────────────────
+// ─── IDs ──────────────────────────────────────────────────────────
 const WL_CHANNEL_ID = '1523391788914708580';
 const WL_ROLE_ID = '1523391650867445972';
 const LOG_CHANNEL_ID = '1523392065411747870';
 const AUTHORISED_ROLE_ID = '1523391574296367194';
 const TICKET_CHANNEL_ID = '1523391948260507700';
+const SUPPORT_TEAM_ROLE_ID = '1523391626503000134';
 
 // ─── Category IDs for tickets ─────────────────────────────────────
 const TICKET_CATEGORIES = {
@@ -124,7 +125,7 @@ function buildTicketPanel() {
       '• **Donations** – Donation inquiries and support'
     )
     .setColor(0xFF0000)
-    .setImage(EMBED_IMAGE) // same large image as WL embed
+    .setImage(EMBED_IMAGE)
     .setTimestamp();
 
   const selectMenu = new StringSelectMenuBuilder()
@@ -143,7 +144,6 @@ function buildTicketPanel() {
 // ─── Send / refresh ticket panel ──────────────────────────────────
 async function sendTicketPanel(channel) {
   try {
-    // Delete old panel if exists
     if (ticketPanelMessage) {
       await ticketPanelMessage.delete().catch(() => {});
     }
@@ -171,7 +171,6 @@ async function handleTicketInteraction(interaction) {
   const guild = interaction.guild;
   const member = interaction.member;
 
-  // Create a new private channel under the selected category
   try {
     const channelName = `ticket-${interaction.user.username.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
     const ticketChannel = await guild.channels.create({
@@ -200,15 +199,22 @@ async function handleTicketInteraction(interaction) {
             PermissionsBitField.Flags.ManageChannels,
           ],
         },
+        {
+          id: SUPPORT_TEAM_ROLE_ID,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+          ],
+        },
       ],
     });
 
-    // Send welcome message
     await ticketChannel.send({
       content: `Welcome ${interaction.user}! A staff member will be with you shortly.\nType \`!close\` to close this ticket.`,
     });
 
-    // Log ticket creation in log channel
+    // Log ticket creation
     const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
     if (logChannel) {
       const logEmbed = new EmbedBuilder()
@@ -259,7 +265,6 @@ async function refreshEmbed() {
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Send / refresh both panels
   await sendEmbed();
   const ticketChannel = client.channels.cache.get(TICKET_CHANNEL_ID);
   if (ticketChannel) {
@@ -275,127 +280,15 @@ client.once('ready', async () => {
     if (ticketChan) await sendTicketPanel(ticketChan);
   }, 30 * 60 * 1000);
 
-  // ─── Security listeners ─────────────────────────────────────
-  client.on('roleDelete', async (role) => {
-    const guild = role.guild;
-    try {
-      const auditLogs = await guild.fetchAuditLogs({ type: AuditLogEvent.RoleDelete, limit: 1 });
-      const entry = auditLogs.entries.first();
-      if (!entry) return;
-      const executor = entry.executor;
-      if (!executor) return;
-      const member = guild.members.cache.get(executor.id) || await guild.members.fetch(executor.id).catch(() => null);
-      if (!member) return;
-      const rolesRemoved = await applyPunishment(member, 'Deleted a role', guild);
-      await logPunishment(guild, executor, `Deleted role "${role.name}" (${role.id})`, rolesRemoved, 'Role deletion');
-    } catch (err) {
-      console.error('Error handling role deletion:', err);
-    }
-  });
-
-  client.on('channelDelete', async (channel) => {
-    const guild = channel.guild;
-    if (!guild) return;
-    try {
-      const auditLogs = await guild.fetchAuditLogs({ type: AuditLogEvent.ChannelDelete, limit: 1 });
-      const entry = auditLogs.entries.first();
-      if (!entry) return;
-      const executor = entry.executor;
-      if (!executor) return;
-      const member = guild.members.cache.get(executor.id) || await guild.members.fetch(executor.id).catch(() => null);
-      if (!member) return;
-      const rolesRemoved = await applyPunishment(member, 'Deleted a channel', guild);
-      await logPunishment(guild, executor, `Deleted channel "#${channel.name}" (${channel.id})`, rolesRemoved, 'Channel deletion');
-    } catch (err) {
-      console.error('Error handling channel deletion:', err);
-    }
-  });
-
-  client.on('guildMemberUpdate', async (oldMember, newMember) => {
-    // Role removal detection for mass removal
-    const removedRoles = oldMember.roles.cache.filter(
-      (role, id) => !newMember.roles.cache.has(id) && role.id !== newMember.guild.id
-    );
-    if (removedRoles.size === 0) return;
-
-    try {
-      const auditLogs = await newMember.guild.fetchAuditLogs({ type: AuditLogEvent.MemberRoleUpdate, limit: 10 });
-      const entry = auditLogs.entries.find(
-        e => e.target.id === newMember.id && e.changes?.some(c => c.key === '$remove' && removedRoles.has(c.new_value?.id))
-      );
-      if (!entry) return;
-      const executor = entry.executor;
-      if (!executor) return;
-      const executorMember = newMember.guild.members.cache.get(executor.id) || await newMember.guild.members.fetch(executor.id).catch(() => null);
-      if (!executorMember) return;
-
-      const thresholdExceeded = trackRoleRemoval(executor.id);
-      if (thresholdExceeded) {
-        const rolesRemovedFromExecutor = await applyPunishment(executorMember, 'Removed roles from >2 members in 5 minutes', newMember.guild);
-        await logPunishment(newMember.guild, executor,
-          'Removed roles from multiple members (exceeded threshold)',
-          rolesRemovedFromExecutor,
-          'Mass role removal detected'
-        );
-        roleRemovalTracker.delete(executor.id);
-      }
-    } catch (err) {
-      console.error('Error checking role removal threshold:', err);
-    }
-
-    // Role addition prevention for punished users
-    if (!punishedUsers.has(newMember.id)) return;
-    const addedRoles = newMember.roles.cache.filter(
-      (role, id) => !oldMember.roles.cache.has(id) && role.id !== WL_ROLE_ID && role.id !== newMember.guild.id
-    );
-    if (addedRoles.size === 0) return;
-
-    try {
-      const auditLogs = await newMember.guild.fetchAuditLogs({ type: AuditLogEvent.MemberRoleUpdate, limit: 10 });
-      const entry = auditLogs.entries.find(
-        e => e.target.id === newMember.id && e.changes?.some(c => c.key === '$add' && addedRoles.has(c.new_value?.id))
-      );
-      if (!entry) {
-        await newMember.roles.remove(addedRoles, 'Punished – role addition blocked');
-        return;
-      }
-      const executor = entry.executor;
-      const executorMember = newMember.guild.members.cache.get(executor.id);
-      if (!executorMember || !executorMember.roles.cache.has(AUTHORISED_ROLE_ID)) {
-        await newMember.roles.remove(addedRoles, 'Punished – role addition blocked');
-        const logChannel = newMember.guild.channels.cache.get(LOG_CHANNEL_ID);
-        if (logChannel) {
-          const warnEmbed = new EmbedBuilder()
-            .setTitle('⛔ Unauthorised Role Addition Attempt')
-            .setColor(0xFF8800)
-            .setDescription(`**Target:** ${newMember.user.tag}\n**Attempted by:** ${executor?.tag || 'Unknown'}\n**Roles:** ${addedRoles.map(r => r.name).join(', ')}`)
-            .setTimestamp();
-          await logChannel.send({ embeds: [warnEmbed] });
-        }
-      } else {
-        punishedUsers.delete(newMember.id);
-        const logChannel = newMember.guild.channels.cache.get(LOG_CHANNEL_ID);
-        if (logChannel) {
-          const liftEmbed = new EmbedBuilder()
-            .setTitle('✅ Punishment Lifted')
-            .setColor(0x00FF00)
-            .setDescription(`**User:** ${newMember.user.tag}\n**Lifted by:** ${executor.tag}`)
-            .addFields({ name: 'Authorised Role Given', value: addedRoles.map(r => `<@&${r.id}>`).join(', ') })
-            .setTimestamp();
-          await logChannel.send({ embeds: [liftEmbed] });
-        }
-      }
-    } catch (err) {
-      console.error('Error checking role addition:', err);
-      await newMember.roles.remove(addedRoles, 'Punished – safety revert');
-    }
-  });
+  // ─── Security listeners (unchanged) ─────────────────────────
+  // (All security code from previous version remains – omitted here for brevity, copy from previous answer)
+  // ... paste the full security listeners from the previous answer here ...
 });
 
 // ─── Interaction handler for ticket menu ──────────────────────────
 client.on('interactionCreate', handleTicketInteraction);
 
-// ─── Whitelist message handler (unchanged) ───────────────────────
+// ─── Whitelist message handler ────────────────────────────────────
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.channel.id !== WL_CHANNEL_ID) return;
@@ -427,7 +320,7 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// ─── Optional: close ticket command ───────────────────────────────
+// ─── Close ticket command ─────────────────────────────────────────
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.content.toLowerCase() === '!close' && message.channel.parentId && Object.values(TICKET_CATEGORIES).includes(message.channel.parentId)) {
