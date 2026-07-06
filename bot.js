@@ -31,7 +31,7 @@ function buildEmbed() {
   return new EmbedBuilder()
     .setTitle(EMBED_TITLE)
     .setDescription(EMBED_DESCRIPTION)
-    .setColor(0xFF0000);
+    .setColor(0xFF0000) // removed stray semicolon!
     .setImage(EMBED_IMAGE)
     .setThumbnail(EMBED_THUMBNAIL)
     .setFooter({ text: EMBED_FOOTER_TEXT, iconURL: EMBED_FOOTER_ICON });
@@ -83,15 +83,13 @@ client.on('messageCreate', async (message) => {
       if (!member) return;
 
       if (member.roles.cache.has(WL_ROLE_ID)) {
-        // Already whitelisted – reply and react
-        await message.react('✅');
+        // Already whitelisted – reply only (no reaction)
         await message.reply({ content: 'You are already whitelisted!' });
         return;
       }
 
       await member.roles.add(WL_ROLE_ID, 'Whitelist via wl command');
-      await message.react('✅');
-      // Permanent reply (not deleted)
+      // Permanent reply
       await message.reply({ content: 'You have been whitelisted!' });
     } catch (err) {
       console.error('Error adding whitelist role:', err);
