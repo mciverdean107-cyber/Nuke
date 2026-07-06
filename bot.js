@@ -31,7 +31,7 @@ function buildEmbed() {
   return new EmbedBuilder()
     .setTitle(EMBED_TITLE)
     .setDescription(EMBED_DESCRIPTION)
-    .setColor(0xFF0000) // removed stray semicolon!
+    .setColor(0xFF0000)
     .setImage(EMBED_IMAGE)
     .setThumbnail(EMBED_THUMBNAIL)
     .setFooter({ text: EMBED_FOOTER_TEXT, iconURL: EMBED_FOOTER_ICON });
@@ -73,6 +73,50 @@ client.once('ready', async () => {
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+
+  // ─── !removeadmin command ───────────────────────────────────────
+  if (message.content.trim().startsWith('!removeadmin')) {
+    // Check user permission
+    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return message.reply('❌ You need the **Administrator** permission to use this command.');
+    }
+
+    // Check bot permission
+    if (!message.guild.members.me.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+      return message.reply('❌ I need the **Manage Roles** permission to edit roles.');
+    }
+
+    const roles = message.guild.roles.cache;
+    let removedCount = 0;
+    let failedCount = 0;
+
+    for (const role of roles.values()) {
+      if (role.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        // Ensure the bot can edit this role (hierarchy check)
+        if (role.comparePositionTo(message.guild.members.me.roles.highest) >= 0) {
+          failedCount++;
+          continue; // Bot's highest role is below this role, skip
+        }
+
+        try {
+          const newPerms = role.permissions.remove(PermissionsBitField.Flags.Administrator);
+          await role.setPermissions(newPerms);
+          removedCount++;
+        } catch (err) {
+          console.error(`Failed to remove admin from role ${role.name}:`, err);
+          failedCount++;
+        }
+      }
+    }
+
+    await message.reply(
+      `✅ Removed ADMINISTRATOR permission from **${removedCount}** role(s).` +
+      (failedCount > 0 ? `\n⚠️ Could not modify **${failedCount}** role(s) (probably hierarchy).` : '')
+    );
+    return; // Exit early, don't process wl channel logic
+  }
+
+  // ─── Whitelist channel logic (unchanged) ────────────────────────
   if (message.channel.id !== WL_CHANNEL_ID) return;
 
   const content = message.content.trim().toLowerCase();
@@ -83,13 +127,11 @@ client.on('messageCreate', async (message) => {
       if (!member) return;
 
       if (member.roles.cache.has(WL_ROLE_ID)) {
-        // Already whitelisted – reply only (no reaction)
         await message.reply({ content: 'You are already whitelisted!' });
         return;
       }
 
       await member.roles.add(WL_ROLE_ID, 'Whitelist via wl command');
-      // Permanent reply
       await message.reply({ content: 'You have been whitelisted!' });
     } catch (err) {
       console.error('Error adding whitelist role:', err);
