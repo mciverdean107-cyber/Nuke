@@ -31,7 +31,7 @@ function buildEmbed() {
   return new EmbedBuilder()
     .setTitle(EMBED_TITLE)
     .setDescription(EMBED_DESCRIPTION)
-    .setColor(0x9B59B6)
+    .setColor(0xFF0000);
     .setImage(EMBED_IMAGE)
     .setThumbnail(EMBED_THUMBNAIL)
     .setFooter({ text: EMBED_FOOTER_TEXT, iconURL: EMBED_FOOTER_ICON });
