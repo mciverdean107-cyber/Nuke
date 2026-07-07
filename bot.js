@@ -9,6 +9,7 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
+  Partials,
 } = require('discord.js');
 
 const client = new Client({
@@ -21,6 +22,16 @@ const client = new Client({
     16384,      // GuildMessageComponents
     4096,       // DirectMessages (essential for DMs)
   ],
+  // Without these, Discord.js silently drops events for anything it hasn't
+  // already cached (e.g. a message posted before the bot's cache picked it
+  // up, or before a restart) — which was causing most deletions to go unlogged.
+  partials: [
+    Partials.Message,
+    Partials.Channel,
+    Partials.GuildMember,
+    Partials.User,
+    Partials.Reaction,
+  ],
 });
 
 // ─── IDs ──────────────────────────────────────────────────────────
@@ -28,6 +39,9 @@ const WL_CHANNEL_ID = '1523520648008306738';
 const WL_ROLE_ID = '1523520328993607690';
 const LOG_CHANNEL_ID = '1523520973113135164';
 const AUTHORISED_ROLE_ID = '1523520155651538944';
+// The ONLY role allowed to grant roles back to a punished user.
+// If anyone else adds a role to a punished user, it gets stripped again instantly.
+const PUNISHMENT_OVERRIDE_ROLE_ID = '1275403786038280313';
 const TICKET_CHANNEL_ID = '1523520763263586354';
 const SUPPORT_TEAM_ROLE_ID = '1523520322718924811';
 const APPLY_CHANNEL_ID = '1523520760440815706';
@@ -549,6 +563,31 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
     console.error('Error logging role change:', err);
   }
 
+  // Role lock: punished users cannot keep any role added to them unless
+  // the person/bot granting it has PUNISHMENT_OVERRIDE_ROLE_ID.
+  try {
+    if (addedRoles.size > 0 && punishedUsers.has(newMember.id)) {
+      let executorMember = null;
+      if (entry && entry.executor && entry.target?.id === newMember.id) {
+        executorMember = await guild.members.fetch(entry.executor.id).catch(() => null);
+      }
+      const executorHasOverride = executorMember?.roles.cache.has(PUNISHMENT_OVERRIDE_ROLE_ID);
+
+      if (!executorHasOverride) {
+        await newMember.roles.remove(addedRoles, 'Punished user — role re-added without override authorization, stripped again');
+        await logPunishment(
+          guild,
+          newMember.user,
+          `Blocked re-added role(s): ${addedRoles.map(r => r.name).join(', ')}`,
+          addedRoles,
+          `Granted by ${executorTag}, who lacks the punishment override role. Roles stripped again instantly.`
+        );
+      }
+    }
+  } catch (err) {
+    console.error('Error enforcing punished-user role lock:', err);
+  }
+
   // Punishment check (removals only).
   try {
     if (removedRoles.size === 0) return;
@@ -575,26 +614,33 @@ client.on('messageDelete', async (message) => {
   try {
     if (!message.guild) return;
     if (message.author?.id === client.user.id) return; // don't log the bot's own panel refreshes
-    if (message.partial) return; // content unavailable, nothing useful to show
 
     let executorTag = 'Self-deleted (or no audit log entry found)';
     try {
       const entry = await getFreshAuditEntry(message.guild, AuditLogEvent.MessageDelete);
-      if (entry && entry.target?.id === message.author?.id) {
+      if (entry && (!message.author || entry.target?.id === message.author.id)) {
         executorTag = `${entry.executor.tag} (${entry.executor.id})`;
       }
     } catch (err) {
       console.error('Audit log lookup failed for messageDelete:', err);
     }
 
-    const content = message.content && message.content.length > 0
-      ? message.content.slice(0, 500)
-      : '*No text content (embed, attachment, or empty message)*';
+    // If the message wasn't cached (message.partial), we won't have author/
+    // content — still log the deletion itself rather than skipping it.
+    const authorLine = message.author
+      ? `${message.author.tag} (${message.author.id})`
+      : `Unknown (message wasn't cached — id: ${message.id})`;
+
+    const content = message.partial
+      ? '*Not available (message was not cached before deletion)*'
+      : (message.content && message.content.length > 0
+        ? message.content.slice(0, 500)
+        : '*No text content (embed, attachment, or empty message)*');
 
     await logEvent(
       message.guild,
       '🗑️ Message Deleted',
-      `**Author:** ${message.author?.tag ?? 'Unknown'} (${message.author?.id ?? 'Unknown'})\n**Channel:** ${message.channel}\n**Deleted by:** ${executorTag}\n**Content:**\n${content}`,
+      `**Author:** ${authorLine}\n**Channel:** ${message.channel}\n**Deleted by:** ${executorTag}\n**Content:**\n${content}`,
       0xFF8C00
     );
   } catch (err) {
@@ -646,12 +692,14 @@ client.on('guildMemberRemove', async (member) => {
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Warn loudly (console + log channel) if the bot can't see audit logs —
-  // without this permission, punishment for role/channel deletion and mass
-  // bans/role-removals silently cannot detect who did it.
   for (const guild of client.guilds.cache.values()) {
     const me = await guild.members.fetchMe().catch(() => null);
-    if (me && !me.permissions.has(PermissionsBitField.Flags.ViewAuditLog)) {
+    if (!me) continue;
+
+    // Warn loudly (console + log channel) if the bot can't see audit logs —
+    // without this permission, punishment for role/channel deletion and mass
+    // bans/role-removals silently cannot detect who did it.
+    if (!me.permissions.has(PermissionsBitField.Flags.ViewAuditLog)) {
       console.warn(`⚠️ Missing "View Audit Log" permission in guild: ${guild.name} (${guild.id}). Security punishments will not work until this is granted.`);
       const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
       if (logChannel) {
@@ -662,6 +710,26 @@ client.once('ready', async () => {
             .setDescription('I don\'t have the **View Audit Log** permission in this server. Role deletion, channel deletion, mass ban, and mass role removal punishments will NOT work until I\'m given this permission.')
             .setTimestamp()],
         }).catch(() => {});
+      }
+    }
+
+    // Separately check the log channel itself — if the bot can't view or
+    // send messages there, EVERY log (security + general activity) fails
+    // silently with no way to warn inside Discord, so this must go to console.
+    const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
+    if (!logChannel) {
+      console.warn(`⚠️ LOG_CHANNEL_ID (${LOG_CHANNEL_ID}) was not found in guild "${guild.name}". Check the ID is correct and the bot can see it.`);
+    } else {
+      const perms = logChannel.permissionsFor(me);
+      const canView = perms?.has(PermissionsBitField.Flags.ViewChannel);
+      const canSend = perms?.has(PermissionsBitField.Flags.SendMessages);
+      const canEmbed = perms?.has(PermissionsBitField.Flags.EmbedLinks);
+      if (!canView || !canSend || !canEmbed) {
+        console.warn(
+          `⚠️ Missing permissions in log channel #${logChannel.name} (guild "${guild.name}"): ` +
+          `${!canView ? 'View Channel ' : ''}${!canSend ? 'Send Messages ' : ''}${!canEmbed ? 'Embed Links' : ''}` +
+          ` — nothing will be logged there until this is fixed.`
+        );
       }
     }
   }
