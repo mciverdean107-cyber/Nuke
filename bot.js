@@ -41,7 +41,7 @@ const LOG_CHANNEL_ID = '1523520973113135164';
 const AUTHORISED_ROLE_ID = '1523520155651538944';
 // The ONLY role allowed to grant roles back to a punished user.
 // If anyone else adds a role to a punished user, it gets stripped again instantly.
-const PUNISHMENT_OVERRIDE_ROLE_ID = '1275403786038280313';
+const PUNISHMENT_OVERRIDE_ROLE_ID = '15235201556515389449';
 const TICKET_CHANNEL_ID = '1523520763263586354';
 const SUPPORT_TEAM_ROLE_ID = '1523520322718924811';
 const APPLY_CHANNEL_ID = '1523520760440815706';
