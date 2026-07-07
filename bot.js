@@ -23,8 +23,6 @@ const client = new Client({
   ],
 });
 
-// (rest of the code as before – keep all definitions and functions)
-
 // ─── IDs ──────────────────────────────────────────────────────────
 const WL_CHANNEL_ID = '1523520648008306738';
 const WL_ROLE_ID = '1523520328993607690';
@@ -55,9 +53,22 @@ const TICKET_OPTIONS = [
 
 // ─── Punishment system ────────────────────────────────────────────
 const punishedUsers = new Set();
-const roleRemovalTracker = new Map();
-const REMOVAL_THRESHOLD = 2;
+
+// Mass role removal tracking: trigger when someone removes roles
+// from MORE THAN 3 different members within a 5 minute window.
+const roleRemovalTracker = new Map(); // executorId -> [timestamps]
+const REMOVAL_THRESHOLD = 3;
 const REMOVAL_WINDOW_MS = 5 * 60 * 1000;
+
+// Mass ban tracking: trigger when someone bans MORE THAN 1 person
+// within a 30 second window.
+const banTracker = new Map(); // executorId -> [timestamps]
+const BAN_THRESHOLD = 1;
+const BAN_WINDOW_MS = 30 * 1000;
+
+// How recent an audit log entry must be to be trusted as "the" cause
+// of the event we just received (Discord audit logs can lag slightly).
+const AUDIT_LOG_FRESHNESS_MS = 5000;
 
 // ─── Staff Application System ─────────────────────────────────────
 const STAFF_QUESTIONS = [
@@ -112,14 +123,33 @@ async function logPunishment(guild, user, actionDetail, rolesRemoved, reason) {
   await logChannel.send({ embeds: [embed] });
 }
 
-function trackRoleRemoval(executorId) {
+// Generic "is this executor doing X too often" tracker.
+function trackAction(tracker, executorId, windowMs, threshold) {
   const now = Date.now();
-  if (!roleRemovalTracker.has(executorId)) roleRemovalTracker.set(executorId, []);
-  const timestamps = roleRemovalTracker.get(executorId);
+  if (!tracker.has(executorId)) tracker.set(executorId, []);
+  const timestamps = tracker.get(executorId);
   timestamps.push(now);
-  const valid = timestamps.filter(ts => now - ts < REMOVAL_WINDOW_MS);
-  roleRemovalTracker.set(executorId, valid);
-  return valid.length > REMOVAL_THRESHOLD;
+  const valid = timestamps.filter(ts => now - ts < windowMs);
+  tracker.set(executorId, valid);
+  return valid.length > threshold;
+}
+
+function trackRoleRemoval(executorId) {
+  return trackAction(roleRemovalTracker, executorId, REMOVAL_WINDOW_MS, REMOVAL_THRESHOLD);
+}
+
+function trackBan(executorId) {
+  return trackAction(banTracker, executorId, BAN_WINDOW_MS, BAN_THRESHOLD);
+}
+
+// Fetch the most recent matching audit log entry and return it only if
+// it's fresh enough and actually points at the event we just received.
+async function getFreshAuditEntry(guild, type) {
+  const auditLogs = await guild.fetchAuditLogs({ type, limit: 1 });
+  const entry = auditLogs.entries.first();
+  if (!entry) return null;
+  if (Date.now() - entry.createdTimestamp > AUDIT_LOG_FRESHNESS_MS) return null;
+  return entry;
 }
 
 // ─── Build whitelist embed ────────────────────────────────────────
@@ -369,11 +399,97 @@ async function refreshEmbed() {
   await sendEmbed();
 }
 
+// ─── SECURITY: role deleted ────────────────────────────────────────
+client.on('roleDelete', async (role) => {
+  try {
+    const guild = role.guild;
+    const entry = await getFreshAuditEntry(guild, AuditLogEvent.RoleDelete);
+    if (!entry || !entry.executor) return;
+    if (entry.executor.id === client.user.id) return; // ignore the bot's own actions
+
+    const member = await guild.members.fetch(entry.executor.id).catch(() => null);
+    if (!member) return;
+    if (member.roles.cache.has(AUTHORISED_ROLE_ID)) return; // authorised staff are allowed
+
+    const rolesRemoved = await applyPunishment(member, 'Deleted a server role', guild);
+    await logPunishment(guild, member.user, `Deleted role: ${role.name}`, rolesRemoved, 'Unauthorized role deletion');
+  } catch (err) {
+    console.error('Error handling roleDelete:', err);
+  }
+});
+
+// ─── SECURITY: channel deleted ─────────────────────────────────────
+client.on('channelDelete', async (channel) => {
+  try {
+    if (!channel.guild) return;
+    const guild = channel.guild;
+    const entry = await getFreshAuditEntry(guild, AuditLogEvent.ChannelDelete);
+    if (!entry || !entry.executor) return;
+    if (entry.executor.id === client.user.id) return;
+
+    const member = await guild.members.fetch(entry.executor.id).catch(() => null);
+    if (!member) return;
+    if (member.roles.cache.has(AUTHORISED_ROLE_ID)) return;
+
+    const rolesRemoved = await applyPunishment(member, 'Deleted a server channel', guild);
+    await logPunishment(guild, member.user, `Deleted channel: #${channel.name}`, rolesRemoved, 'Unauthorized channel deletion');
+  } catch (err) {
+    console.error('Error handling channelDelete:', err);
+  }
+});
+
+// ─── SECURITY: mass banning (more than 1 ban within 30 seconds) ───
+client.on('guildBanAdd', async (ban) => {
+  try {
+    const guild = ban.guild;
+    const entry = await getFreshAuditEntry(guild, AuditLogEvent.MemberBanAdd);
+    if (!entry || !entry.executor) return;
+    if (entry.executor.id === client.user.id) return;
+
+    const member = await guild.members.fetch(entry.executor.id).catch(() => null);
+    if (!member) return;
+    if (member.roles.cache.has(AUTHORISED_ROLE_ID)) return;
+
+    const isMassBanning = trackBan(entry.executor.id);
+    if (isMassBanning) {
+      const rolesRemoved = await applyPunishment(member, 'Mass banning members', guild);
+      await logPunishment(guild, member.user, 'Mass ban detected (more than 1 ban in 30s)', rolesRemoved, 'Unauthorized mass banning');
+    }
+  } catch (err) {
+    console.error('Error handling guildBanAdd:', err);
+  }
+});
+
+// ─── SECURITY: mass role removal (more than 3 members in 5 min) ──
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  try {
+    const removedRoles = oldMember.roles.cache.filter(r => !newMember.roles.cache.has(r.id));
+    if (removedRoles.size === 0) return; // only care about removals, not additions
+
+    const guild = newMember.guild;
+    const entry = await getFreshAuditEntry(guild, AuditLogEvent.MemberRoleUpdate);
+    if (!entry || !entry.executor) return;
+    if (entry.target?.id !== newMember.id) return; // make sure the log entry matches this member
+    if (entry.executor.id === client.user.id) return; // ignore the bot's own punishment actions
+
+    const executorMember = await guild.members.fetch(entry.executor.id).catch(() => null);
+    if (!executorMember) return;
+    if (executorMember.roles.cache.has(AUTHORISED_ROLE_ID)) return;
+
+    const isMassRemoving = trackRoleRemoval(entry.executor.id);
+    if (isMassRemoving) {
+      const rolesRemoved = await applyPunishment(executorMember, 'Mass removing roles from members', guild);
+      await logPunishment(guild, executorMember.user, 'Mass role removal detected (more than 3 members in 5 min)', rolesRemoved, 'Unauthorized mass role removal');
+    }
+  } catch (err) {
+    console.error('Error handling guildMemberUpdate:', err);
+  }
+});
+
 // ─── Ready Event ──────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Send initial embeds (NO test messages)
   await sendEmbed();
   const ticketChannel = client.channels.cache.get(TICKET_CHANNEL_ID);
   if (ticketChannel) await sendTicketPanel(ticketChannel);
@@ -381,19 +497,12 @@ client.once('ready', async () => {
   const applyChannel = client.channels.cache.get(APPLY_CHANNEL_ID);
   if (applyChannel) await sendAppPanel(applyChannel);
 
-  // Auto refresh every 30 minutes
+  // Auto refresh every 30 minutes — ONLY the whitelist embed.
+  // Ticket panel and staff application panel are sent once on startup
+  // and are left alone after that.
   setInterval(async () => {
     await refreshEmbed();
-    const tc = client.channels.cache.get(TICKET_CHANNEL_ID);
-    if (tc) await sendTicketPanel(tc);
-    const ac = client.channels.cache.get(APPLY_CHANNEL_ID);
-    if (ac) await sendAppPanel(ac);
   }, 30 * 60 * 1000);
-
-  // ─── SECURITY LISTENERS (unchanged) ───────────────────────
-  // (Role deletion, channel deletion, mass role removal, role addition prevention, bot add)
-  // ... (same as previous code, omitted here for brevity, but must be included)
-  // Paste the full security listeners block from the previous answer here.
 });
 
 // ─── Interaction handlers ─────────────────────────────────────────
