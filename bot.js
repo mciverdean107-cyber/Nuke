@@ -68,7 +68,7 @@ const BAN_WINDOW_MS = 30 * 1000;
 
 // How recent an audit log entry must be to be trusted as "the" cause
 // of the event we just received (Discord audit logs can lag slightly).
-const AUDIT_LOG_FRESHNESS_MS = 5000;
+const AUDIT_LOG_FRESHNESS_MS = 10000;
 
 // ─── Staff Application System ─────────────────────────────────────
 const STAFF_QUESTIONS = [
@@ -121,6 +121,39 @@ async function logPunishment(guild, user, actionDetail, rolesRemoved, reason) {
     .setTimestamp()
     .setFooter({ text: 'Auto Security Log' });
   await logChannel.send({ embeds: [embed] });
+}
+
+// General (non-punishment) activity log — messages deleted, joins/leaves,
+// role changes, etc. Posts to the same LOG_CHANNEL_ID with its own color
+// per event type so it's easy to visually tell apart from security actions.
+async function logEvent(guild, title, description, color = 0x5865F2) {
+  const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
+  if (!logChannel) return;
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setColor(color)
+    .setDescription(description)
+    .setTimestamp();
+  await logChannel.send({ embeds: [embed] }).catch(err => console.error('Failed to send log event:', err));
+}
+
+// If an audit-log lookup fails (most commonly: bot is missing the
+// "View Audit Log" permission), report it instead of silently swallowing it,
+// so a punishment that should have happened doesn't just vanish with no trace.
+async function reportAuditFailure(guild, context, err) {
+  console.error(`Audit log lookup failed (${context}):`, err);
+  const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
+  if (!logChannel) return;
+  const embed = new EmbedBuilder()
+    .setTitle('⚠️ Security Check Failed')
+    .setColor(0xFFFF00)
+    .setDescription(
+      `Could not check the audit log for **${context}**, so no action was taken.\n` +
+      `**Likely cause:** the bot is missing the **View Audit Log** permission.\n` +
+      `**Error:** \`${err.message || err}\``
+    )
+    .setTimestamp();
+  await logChannel.send({ embeds: [embed] }).catch(() => {});
 }
 
 // Generic "is this executor doing X too often" tracker.
@@ -401,9 +434,14 @@ async function refreshEmbed() {
 
 // ─── SECURITY: role deleted ────────────────────────────────────────
 client.on('roleDelete', async (role) => {
+  const guild = role.guild;
+  let entry;
   try {
-    const guild = role.guild;
-    const entry = await getFreshAuditEntry(guild, AuditLogEvent.RoleDelete);
+    entry = await getFreshAuditEntry(guild, AuditLogEvent.RoleDelete);
+  } catch (err) {
+    return reportAuditFailure(guild, `role deletion (#${role.name})`, err);
+  }
+  try {
     if (!entry || !entry.executor) return;
     if (entry.executor.id === client.user.id) return; // ignore the bot's own actions
 
@@ -420,10 +458,15 @@ client.on('roleDelete', async (role) => {
 
 // ─── SECURITY: channel deleted ─────────────────────────────────────
 client.on('channelDelete', async (channel) => {
+  if (!channel.guild) return;
+  const guild = channel.guild;
+  let entry;
   try {
-    if (!channel.guild) return;
-    const guild = channel.guild;
-    const entry = await getFreshAuditEntry(guild, AuditLogEvent.ChannelDelete);
+    entry = await getFreshAuditEntry(guild, AuditLogEvent.ChannelDelete);
+  } catch (err) {
+    return reportAuditFailure(guild, `channel deletion (#${channel.name})`, err);
+  }
+  try {
     if (!entry || !entry.executor) return;
     if (entry.executor.id === client.user.id) return;
 
@@ -440,9 +483,14 @@ client.on('channelDelete', async (channel) => {
 
 // ─── SECURITY: mass banning (more than 1 ban within 30 seconds) ───
 client.on('guildBanAdd', async (ban) => {
+  const guild = ban.guild;
+  let entry;
   try {
-    const guild = ban.guild;
-    const entry = await getFreshAuditEntry(guild, AuditLogEvent.MemberBanAdd);
+    entry = await getFreshAuditEntry(guild, AuditLogEvent.MemberBanAdd);
+  } catch (err) {
+    return reportAuditFailure(guild, 'member ban', err);
+  }
+  try {
     if (!entry || !entry.executor) return;
     if (entry.executor.id === client.user.id) return;
 
@@ -461,13 +509,49 @@ client.on('guildBanAdd', async (ban) => {
 });
 
 // ─── SECURITY: mass role removal (more than 3 members in 5 min) ──
+// ─── + GENERAL LOG: every role add/remove ─────────────────────────
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
-  try {
-    const removedRoles = oldMember.roles.cache.filter(r => !newMember.roles.cache.has(r.id));
-    if (removedRoles.size === 0) return; // only care about removals, not additions
+  const guild = newMember.guild;
+  const removedRoles = oldMember.roles.cache.filter(r => !newMember.roles.cache.has(r.id));
+  const addedRoles = newMember.roles.cache.filter(r => !oldMember.roles.cache.has(r.id));
+  if (removedRoles.size === 0 && addedRoles.size === 0) return; // nothing role-related changed
 
-    const guild = newMember.guild;
-    const entry = await getFreshAuditEntry(guild, AuditLogEvent.MemberRoleUpdate);
+  let entry;
+  try {
+    entry = await getFreshAuditEntry(guild, AuditLogEvent.MemberRoleUpdate);
+  } catch (err) {
+    return reportAuditFailure(guild, `role update for ${newMember.user.tag}`, err);
+  }
+
+  const executorTag = (entry && entry.executor && entry.target?.id === newMember.id)
+    ? `${entry.executor.tag} (${entry.executor.id})`
+    : 'Unknown';
+
+  // General activity log for any role change, regardless of threshold.
+  try {
+    if (addedRoles.size > 0) {
+      await logEvent(
+        guild,
+        '➕ Role(s) Added',
+        `**Member:** ${newMember.user.tag} (${newMember.id})\n**Roles:** ${addedRoles.map(r => r.name).join(', ')}\n**By:** ${executorTag}`,
+        0x00B0F4
+      );
+    }
+    if (removedRoles.size > 0) {
+      await logEvent(
+        guild,
+        '➖ Role(s) Removed',
+        `**Member:** ${newMember.user.tag} (${newMember.id})\n**Roles:** ${removedRoles.map(r => r.name).join(', ')}\n**By:** ${executorTag}`,
+        0xFFA500
+      );
+    }
+  } catch (err) {
+    console.error('Error logging role change:', err);
+  }
+
+  // Punishment check (removals only).
+  try {
+    if (removedRoles.size === 0) return;
     if (!entry || !entry.executor) return;
     if (entry.target?.id !== newMember.id) return; // make sure the log entry matches this member
     if (entry.executor.id === client.user.id) return; // ignore the bot's own punishment actions
@@ -482,13 +566,105 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
       await logPunishment(guild, executorMember.user, 'Mass role removal detected (more than 3 members in 5 min)', rolesRemoved, 'Unauthorized mass role removal');
     }
   } catch (err) {
-    console.error('Error handling guildMemberUpdate:', err);
+    console.error('Error handling guildMemberUpdate punishment check:', err);
+  }
+});
+
+// ─── GENERAL LOG: message deleted ─────────────────────────────────
+client.on('messageDelete', async (message) => {
+  try {
+    if (!message.guild) return;
+    if (message.author?.id === client.user.id) return; // don't log the bot's own panel refreshes
+    if (message.partial) return; // content unavailable, nothing useful to show
+
+    let executorTag = 'Self-deleted (or no audit log entry found)';
+    try {
+      const entry = await getFreshAuditEntry(message.guild, AuditLogEvent.MessageDelete);
+      if (entry && entry.target?.id === message.author?.id) {
+        executorTag = `${entry.executor.tag} (${entry.executor.id})`;
+      }
+    } catch (err) {
+      console.error('Audit log lookup failed for messageDelete:', err);
+    }
+
+    const content = message.content && message.content.length > 0
+      ? message.content.slice(0, 500)
+      : '*No text content (embed, attachment, or empty message)*';
+
+    await logEvent(
+      message.guild,
+      '🗑️ Message Deleted',
+      `**Author:** ${message.author?.tag ?? 'Unknown'} (${message.author?.id ?? 'Unknown'})\n**Channel:** ${message.channel}\n**Deleted by:** ${executorTag}\n**Content:**\n${content}`,
+      0xFF8C00
+    );
+  } catch (err) {
+    console.error('Error handling messageDelete:', err);
+  }
+});
+
+// ─── GENERAL LOG: member joined ───────────────────────────────────
+client.on('guildMemberAdd', async (member) => {
+  try {
+    const accountAgeDays = Math.floor((Date.now() - member.user.createdTimestamp) / (1000 * 60 * 60 * 24));
+    await logEvent(
+      member.guild,
+      '📥 Member Joined',
+      `**User:** ${member.user.tag} (${member.id})\n**Account created:** ${accountAgeDays} day(s) ago`,
+      0x00FF00
+    );
+  } catch (err) {
+    console.error('Error handling guildMemberAdd:', err);
+  }
+});
+
+// ─── GENERAL LOG: member left / kicked ────────────────────────────
+client.on('guildMemberRemove', async (member) => {
+  try {
+    let action = 'Left';
+    let executorTag = null;
+    try {
+      const entry = await getFreshAuditEntry(member.guild, AuditLogEvent.MemberKick);
+      if (entry && entry.target?.id === member.id) {
+        action = 'Kicked';
+        executorTag = `${entry.executor.tag} (${entry.executor.id})`;
+      }
+    } catch (err) {
+      console.error('Audit log lookup failed for guildMemberRemove:', err);
+    }
+    await logEvent(
+      member.guild,
+      `📤 Member ${action}`,
+      `**User:** ${member.user.tag} (${member.id})${executorTag ? `\n**By:** ${executorTag}` : ''}`,
+      0xFF4500
+    );
+  } catch (err) {
+    console.error('Error handling guildMemberRemove:', err);
   }
 });
 
 // ─── Ready Event ──────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+
+  // Warn loudly (console + log channel) if the bot can't see audit logs —
+  // without this permission, punishment for role/channel deletion and mass
+  // bans/role-removals silently cannot detect who did it.
+  for (const guild of client.guilds.cache.values()) {
+    const me = await guild.members.fetchMe().catch(() => null);
+    if (me && !me.permissions.has(PermissionsBitField.Flags.ViewAuditLog)) {
+      console.warn(`⚠️ Missing "View Audit Log" permission in guild: ${guild.name} (${guild.id}). Security punishments will not work until this is granted.`);
+      const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
+      if (logChannel) {
+        await logChannel.send({
+          embeds: [new EmbedBuilder()
+            .setTitle('⚠️ Missing Permission: View Audit Log')
+            .setColor(0xFFFF00)
+            .setDescription('I don\'t have the **View Audit Log** permission in this server. Role deletion, channel deletion, mass ban, and mass role removal punishments will NOT work until I\'m given this permission.')
+            .setTimestamp()],
+        }).catch(() => {});
+      }
+    }
+  }
 
   await sendEmbed();
   const ticketChannel = client.channels.cache.get(TICKET_CHANNEL_ID);
