@@ -648,18 +648,60 @@ client.on('messageDelete', async (message) => {
   }
 });
 
-// ─── GENERAL LOG: member joined ───────────────────────────────────
+// ─── GENERAL LOG: member joined + SECURITY: unauthorized bot add ──
 client.on('guildMemberAdd', async (member) => {
+  const guild = member.guild;
+
   try {
     const accountAgeDays = Math.floor((Date.now() - member.user.createdTimestamp) / (1000 * 60 * 60 * 24));
     await logEvent(
-      member.guild,
+      guild,
       '📥 Member Joined',
-      `**User:** ${member.user.tag} (${member.id})\n**Account created:** ${accountAgeDays} day(s) ago`,
+      `**User:** ${member.user.tag} (${member.id})\n**Account created:** ${accountAgeDays} day(s) ago${member.user.bot ? '\n**Type:** 🤖 Bot' : ''}`,
       0x00FF00
     );
   } catch (err) {
     console.error('Error handling guildMemberAdd:', err);
+  }
+
+  // Anti-bot-add: any bot added by someone who doesn't have the
+  // punishment override role gets stripped, logged, and banned.
+  if (!member.user.bot) return;
+
+  let entry;
+  try {
+    entry = await getFreshAuditEntry(guild, AuditLogEvent.BotAdd);
+  } catch (err) {
+    return reportAuditFailure(guild, `bot add (${member.user.tag})`, err);
+  }
+
+  try {
+    const executorMember = (entry && entry.executor && entry.target?.id === member.id)
+      ? await guild.members.fetch(entry.executor.id).catch(() => null)
+      : null;
+    const executorTag = executorMember ? `${executorMember.user.tag} (${executorMember.id})` : 'Unknown';
+    const authorized = executorMember?.roles.cache.has(PUNISHMENT_OVERRIDE_ROLE_ID);
+
+    if (authorized) return; // added by someone with the override role — allowed
+
+    // 1. Strip any roles the bot came in with (and lock it via punishedUsers
+    //    so it can't be re-given roles except by the override role).
+    const rolesRemoved = await applyPunishment(member, 'Unauthorized bot added to server', guild);
+
+    // 2. Log it.
+    await logPunishment(
+      guild,
+      member.user,
+      'Unauthorized bot add detected',
+      rolesRemoved,
+      `Added by ${executorTag}, who lacks the punishment override role. This bot is being banned.`
+    );
+
+    // 3. Ban the bot.
+    await guild.members.ban(member.id, { reason: `Unauthorized bot add by ${executorTag} (lacks override role)` })
+      .catch(err => console.error('Failed to ban unauthorized bot:', err));
+  } catch (err) {
+    console.error('Error handling unauthorized bot add:', err);
   }
 });
 
